@@ -330,7 +330,7 @@ export default function Home() {
                   <BarChart data={cashFlowData} margin={{ top: 10, right: 10, left: 30, bottom: 0 }}>
                     <XAxis dataKey="name" stroke="#9ca3af" fontSize={12} />
                     <YAxis stroke="#9ca3af" fontSize={12} tickFormatter={(val) => `₹${val.toLocaleString('en-IN')}`} />
-                    <Tooltip cursor={{ fill: '#374151' }} formatter={(value: number) => `₹${value.toLocaleString('en-IN')}`} contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }} />
+                    <Tooltip cursor={{ fill: '#374151' }} formatter={(value) => `₹${Number(value ?? 0).toLocaleString('en-IN')}`} contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }} />
                     <Bar dataKey="Income" fill="#10b981" radius={[4, 4, 0, 0]} barSize={50} />
                     <Bar dataKey="Expense" fill="#ef4444" radius={[4, 4, 0, 0]} barSize={50} />
                   </BarChart>
