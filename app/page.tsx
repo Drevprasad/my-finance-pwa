@@ -278,7 +278,7 @@ export default function Home() {
           </div>
           
           <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-end">
-            <div className="flex bg-gray-900 rounded-lg p-1 border border-gray-700">
+            <div className="flex overflow-x-auto bg-gray-900 rounded-lg p-1 border border-gray-700 max-w-full hide-scrollbar">
               {['daily', 'weekly', 'monthly', 'yearly', 'all'].map(t => (
                 <button 
                   key={t}
@@ -421,7 +421,8 @@ export default function Home() {
               )}
             </div>
             {isLoading ? <div className="p-8 text-center text-gray-500 animate-pulse">Loading secure ledger...</div> : (
-              <table className="w-full text-left border-collapse">
+              <div className="overflow-x-auto w-full">
+                <table className="w-full min-w-[600px] text-left border-collapse">
                 <thead>
                   <tr className="bg-gray-900/50 text-gray-400 text-sm border-b border-gray-700">
                     <th className="p-4 w-12"><input type="checkbox" className="accent-blue-500 w-4 h-4 rounded cursor-pointer" onChange={handleSelectAll} checked={transactions.length > 0 && selectedTxnIds.length === transactions.length} /></th>
@@ -460,6 +461,7 @@ export default function Home() {
                   ))}
                 </tbody>
               </table>
+            </div>
             )}
           </div>
         </div>
