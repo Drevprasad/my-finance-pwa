@@ -44,7 +44,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (status !== 'in') {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-gray-900 text-sm text-gray-400">
+      <div className="flex min-h-dvh items-center justify-center bg-gray-900 text-sm text-gray-400">
         {status === 'checking' ? 'Loading…' : 'Redirecting…'}
       </div>
     );

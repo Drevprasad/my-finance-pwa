@@ -15,8 +15,6 @@ export const metadata: Metadata = {
   formatDetection: { telephone: false },
 };
 
-// themeColor moved out of `metadata` (deprecated) and viewportFit added so
-// env(safe-area-inset-*) actually reports non-zero values.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
@@ -28,7 +26,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
-      <body>{children}</body>
+      <body>
+        <AuthGate>{children}</AuthGate>
+      </body>
     </html>
   );
 }

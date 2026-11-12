@@ -1,471 +1,635 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { supabase } from '../lib/supabase';
-import Papa from 'papaparse';
-import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import AppShell from '@/components/AppShell';
+import CashflowCharts from '@/components/CashflowCharts';
+import CsvImport from '@/components/CsvImport';
+import EditTxnModal from '@/components/EditTxnModal';
+import { Banner, Card, CardTitle, Field, btn, inputCls } from '@/components/ui';
+import { rangeFor, type RangeKey } from '@/lib/dates';
+import { formatINR, formatINRSigned, parseMoneyToMinor } from '@/lib/money';
+import { supabase } from '@/lib/supabase';
+import type {
+  AccountRow, BalanceRow, CategoryRow, DashboardSummary, TxnRow,
+} from '@/lib/types';
+import { useToday } from '@/lib/use-today';
+
+const PAGE_SIZE = 100;
+const RANGE_KEYS: RangeKey[] = ['daily', 'weekly', 'monthly', 'yearly', 'all'];
+type TxnType = 'income' | 'expense' | 'transfer';
+type KindFilter = 'all' | 'expense' | 'income' | 'transfer';
+type SortField = 'date' | 'amount' | 'payee' | 'category';
+type Status = { kind: 'info' | 'error' | 'success'; msg: string } | null;
 
 export default function Home() {
-  const [transactions, setTransactions] = useState<any[]>([]);
-  const [accounts, setAccounts] = useState<any[]>([]);
-  const [categories, setCategories] = useState<any[]>([]);
-  const [balances, setBalances] = useState<any[]>([]);
-  const [rules, setRules] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<AccountRow[]>([]);
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [balances, setBalances] = useState<BalanceRow[]>([]);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [txns, setTxns] = useState<TxnRow[]>([]);
+  const [hasMore, setHasMore] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [status, setStatus] = useState<Status>(null);
 
-  const [sysExpenseAcc, setSysExpenseAcc] = useState<number>(0);
-  const [sysIncomeAcc, setSysIncomeAcc] = useState<number>(0);
+  const [sysExpenseAcc, setSysExpenseAcc] = useState<number | null>(null);
+  const [sysIncomeAcc, setSysIncomeAcc] = useState<number | null>(null);
 
-  const [txnType, setTxnType] = useState<'income' | 'expense' | 'transfer'>('expense');
+  const today = useToday();
+  const [timeRange, setTimeRange] = useState<RangeKey>('monthly');
+  const range = useMemo(
+    () => (today ? rangeFor(timeRange, today) : null),
+    [today, timeRange],
+  );
+
+  // Filter & Sort state
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
+  const [sortBy, setSortBy] = useState<SortField>('date');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [editingTxn, setEditingTxn] = useState<TxnRow | null>(null);
+
+  // Quick add
+  const [txnType, setTxnType] = useState<TxnType>('expense');
   const [payee, setPayee] = useState('');
   const [amount, setAmount] = useState('');
   const [txnDate, setTxnDate] = useState('');
-  
-  const [selectedAccountId, setSelectedAccountId] = useState('');
-  const [selectedCategoryId, setSelectedCategoryId] = useState('');
-  
-  const [fromAccountId, setFromAccountId] = useState('');
-  const [toAccountId, setToAccountId] = useState('');
-  
-  const [csvAccountId, setCsvAccountId] = useState('');
+  const [accountId, setAccountId] = useState('');
+  const [categoryId, setCategoryId] = useState('');
+  const [fromId, setFromId] = useState('');
+  const [toId, setToId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [importStatus, setImportStatus] = useState('');
-  const [selectedTxnIds, setSelectedTxnIds] = useState<number[]>([]);
 
-  const [expenseChartData, setExpenseChartData] = useState<any[]>([]);
-  const [cashFlowData, setCashFlowData] = useState<any[]>([]);
-  
-  const [timeRange, setTimeRange] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('monthly');
-  const [headerTitle, setHeaderTitle] = useState('');
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
-  // Hydration-safe init
   useEffect(() => {
-    setTxnDate(new Date().toLocaleDateString('en-CA'));   // ✅ local, YYYY-MM-DD
+    if (today) setTxnDate(prev => prev || today);
+  }, [today]);
+
+  useEffect(() => {
+    if (txnType === 'transfer') return;
+    const matching = categories.filter(c => c.kind === txnType);
+    if (matching.length && !matching.some(c => String(c.id) === categoryId)) {
+      setCategoryId(String(matching[0].id));
+    }
+  }, [txnType, categories, categoryId]);
+
+  const catNameById = useMemo(() => {
+    const m: Record<number, string> = {};
+    categories.forEach(c => { m[c.id] = c.name; });
+    return m;
+  }, [categories]);
+
+  const loadReference = useCallback(async () => {
+    const db = supabase();
+    const [accRes, catRes, balRes] = await Promise.all([
+      db.from('accounts')
+        .select('id,name,type,subtype,currency,is_active,credit_limit_minor,statement_day,due_day')
+        .eq('is_active', true).order('name'),
+      db.from('categories').select('id,name,kind,parent_id,is_active').eq('is_active', true).order('name'),
+      db.from('account_balances').select('id,name,type,subtype,balance_minor,is_active'),
+    ]);
+
+    const all = (accRes.data ?? []) as AccountRow[];
+    const disp = all.filter(a => a.type !== 'income' && a.type !== 'expense' && a.type !== 'equity');
+    setAccounts(disp);
+    setSysExpenseAcc(all.find(a => a.type === 'expense')?.id ?? null);
+    setSysIncomeAcc(all.find(a => a.type === 'income')?.id ?? null);
+    setCategories((catRes.data ?? []) as CategoryRow[]);
+    setBalances(((balRes.data ?? []) as BalanceRow[]).filter(b => b.type !== 'income' && b.type !== 'expense' && b.type !== 'equity' && b.is_active));
+
+    if (disp.length) {
+      setAccountId(prev => prev || String(disp[0].id));
+      setFromId(prev => prev || String(disp[0].id));
+      setToId(prev => prev || String((disp[1] ?? disp[0]).id));
+    }
   }, []);
 
-  useEffect(() => {
-    fetchInitialData();
-    
-    // Dynamically set the heading based on timeRange
-    const d = new Date();
-    if (timeRange === 'daily') setHeaderTitle(d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }));
-    else if (timeRange === 'monthly') setHeaderTitle(d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }));
-    else if (timeRange === 'yearly') setHeaderTitle(d.getFullYear().toString());
-    else if (timeRange === 'weekly') setHeaderTitle('Last 7 Days');
-    else setHeaderTitle('All Time');
-  }, [timeRange]);
+  const loadSummary = useCallback(async () => {
+    if (!range) return;
+    const ranges = range.from ? [{ from: range.from, to: range.to ?? range.from }] : [];
+    const { data, error } = await supabase().rpc('dashboard_summary', { p_ranges: ranges });
+    if (error) { setStatus({ kind: 'error', msg: `Summary failed: ${error.message}` }); return; }
+    setSummary(data as DashboardSummary);
+  }, [range]);
 
-  useEffect(() => {
-    const filteredCats = categories.filter(c => c.kind === txnType);
-    if (filteredCats.length > 0) setSelectedCategoryId(filteredCats[0].id.toString());
-  }, [txnType, categories]);
+  const loadTxns = useCallback(async (offset: number) => {
+    if (!range) return [];
 
-  const fetchInitialData = async () => {
-    setIsLoading(true);
-    
-    let query = supabase
+    let q = supabase()
       .from('transactions')
-      .select('id, txn_date, payee, notes, postings(amount_minor, account_id, category_id, accounts(name, type))')
-      .order('txn_date', { ascending: false });
+      .select('id,txn_date,payee,narration,notes,kind,voided_at,postings(id,txn_id,account_id,amount_minor,category_id,accounts(name,type))')
+      .is('voided_at', null)
+      .neq('kind', 'opening')
+      .order('txn_date', { ascending: false })
+      .order('id', { ascending: false });
 
-    if (timeRange !== 'all') {
-      const targetDate = new Date();
-      if (timeRange === 'daily') targetDate.setDate(targetDate.getDate() - 1);
-      else if (timeRange === 'weekly') targetDate.setDate(targetDate.getDate() - 7);
-      else if (timeRange === 'monthly') targetDate.setMonth(targetDate.getMonth() - 1);
-      else if (timeRange === 'yearly') targetDate.setFullYear(targetDate.getFullYear() - 1);
-      
-      query = query.gte('txn_date', targetDate.toISOString().split('T')[0]);
-    } else {
-      query = query.limit(200); 
-    }
+    if (range.from) q = q.gte('txn_date', range.from);
+    if (range.to) q = q.lte('txn_date', range.to);
+    q = q.range(offset, offset + PAGE_SIZE - 1);
 
-    const { data: txns } = await query;
-    const { data: allAccs } = await supabase.from('accounts').select('*');
-    const { data: cats } = await supabase.from('categories').select('*');
-    const { data: bals } = await supabase.from('account_balances').select('*');
-    const { data: dbRules } = await supabase.from('rules').select('*');
+    const { data, error } = await q;
+    if (error) { setStatus({ kind: 'error', msg: `Ledger load failed: ${error.message}` }); return []; }
 
-    if (allAccs) {
-      const expAcc = allAccs.find(a => a.type === 'expense');
-      const incAcc = allAccs.find(a => a.type === 'income');
-      if (expAcc) setSysExpenseAcc(expAcc.id);
-      if (incAcc) setSysIncomeAcc(incAcc.id);
+    const rows = (data ?? []) as unknown as TxnRow[];
+    setTxns(prev => (offset === 0 ? rows : [...prev, ...rows]));
+    setHasMore(rows.length === PAGE_SIZE);
+    return rows;
+  }, [range]);
 
-      const displayAccs = allAccs.filter(a => a.type !== 'expense' && a.type !== 'income');
-      setAccounts(displayAccs);
-      
-      if (displayAccs.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(displayAccs[0].id.toString());
-        setFromAccountId(displayAccs[0].id.toString());
-        setToAccountId(displayAccs.length > 1 ? displayAccs[1].id.toString() : displayAccs[0].id.toString());
-        if (!csvAccountId) setCsvAccountId(displayAccs[0].id.toString());
-      }
-    }
-
-    setTransactions(txns || []);
-    setCategories(cats || []);
-    setBalances(bals || []);
-    setRules(dbRules || []);
-    setSelectedTxnIds([]); 
-    
-    if (txns && cats) {
-      const expDataMap: Record<string, number> = {};
-      let totalIncome = 0;
-      let totalExpense = 0;
-
-      txns.forEach(txn => {
-        txn.postings.forEach((post: any) => {
-          const amt = post.amount_minor / 100;
-          if (post.accounts?.type === 'expense' && amt > 0) {
-            const catName = cats.find(c => c.id === post.category_id)?.name || 'Uncategorized';
-            expDataMap[catName] = (expDataMap[catName] || 0) + amt;
-            totalExpense += amt;
-          }
-          if (post.accounts?.type === 'income' && amt < 0) {
-            totalIncome += Math.abs(amt);
-          }
-        });
-      });
-
-      setExpenseChartData(Object.keys(expDataMap).map(name => ({ name, value: expDataMap[name] })).sort((a, b) => b.value - a.value));
-      setCashFlowData([{ name: timeRange.toUpperCase(), Income: totalIncome, Expense: totalExpense }]);
-    }
-
+  const refreshAll = useCallback(async () => {
+    if (!range) return;
+    setIsLoading(true);
+    setSelectedIds([]);
+    await Promise.all([loadReference(), loadSummary(), loadTxns(0)]);
     setIsLoading(false);
-  };
+  }, [range, loadReference, loadSummary, loadTxns]);
 
-  const generateHash = async (text: string) => {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(text);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  };
+  useEffect(() => {
+    void refreshAll();
+  }, [refreshAll]);
 
-  const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!csvAccountId) {
-      setImportStatus('❌ Please select a target account first.');
-      return;
-    }
-    setImportStatus('Parsing CSV...');
-    
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: async (results) => {
-        setImportStatus(`Processing ${results.data.length} rows...`);
-        let successCount = 0;
-        let duplicateCount = 0;
+  /* ---------------- Client Filter & Sort ---------------- */
+  const visibleTxns = useMemo(() => {
+    const getTxnAmount = (t: TxnRow) => {
+      const nonSys = t.postings.find(p => p.accounts?.type !== 'expense' && p.accounts?.type !== 'income');
+      return Math.abs(nonSys?.amount_minor ?? t.postings[0]?.amount_minor ?? 0);
+    };
+    const getTxnCategory = (t: TxnRow) => {
+      const catLeg = t.postings.find(p => p.category_id != null);
+      if (catLeg?.category_id && catNameById[catLeg.category_id]) return catNameById[catLeg.category_id];
+      return t.kind === 'transfer' ? 'Transfer' : 'Uncategorized';
+    };
 
-        for (const row of results.data as any[]) {
-          if (!row.Date || !row.Amount) continue;
-
-          const amountInPaise = Math.round(parseFloat(row.Amount) * 100);
-          const uniqueString = `${csvAccountId}-${row.Date}-${amountInPaise}-${row.Narration}`;
-          const dedupeHash = await generateHash(uniqueString);
-
-          let finalPayee = 'Bank Import';
-          let finalCategoryId = categories.find(c => c.kind === 'expense')?.id || 1; 
-
-          const upperNarration = (row.Narration || '').toUpperCase();
-          const matchedRule = rules.find(r => upperNarration.includes(r.search_term.toUpperCase()));
-          
-          if (matchedRule) {
-            finalPayee = matchedRule.payee_name;
-            finalCategoryId = matchedRule.category_id;
-          }
-
-          const { data: txn, error: txnError } = await supabase
-            .from('transactions')
-            .insert([{ txn_date: row.Date, payee: finalPayee, narration: row.Narration, dedupe_hash: dedupeHash }])
-            .select().single();
-
-          if (txnError) {
-            if (txnError.code === '23505') duplicateCount++;
-            continue;
-          }
-
-          if (txn) {
-            await supabase.from('postings').insert([
-              { txn_id: txn.id, account_id: parseInt(csvAccountId), amount_minor: -amountInPaise },
-              { txn_id: txn.id, account_id: sysExpenseAcc, category_id: finalCategoryId, amount_minor: amountInPaise }
-            ]);
-            successCount++;
-          }
-        }
-        setImportStatus(`✅ Imported ${successCount} new rows. Skipped ${duplicateCount} duplicates.`);
-        fetchInitialData(); 
-      }
+    const filtered = txns.filter(t => {
+      if (kindFilter === 'all') return true;
+      return t.kind === kindFilter;
     });
-  };
+
+    const mult = sortDir === 'asc' ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'date') {
+        if (a.txn_date !== b.txn_date) return a.txn_date < b.txn_date ? -1 * mult : 1 * mult;
+        return (a.id - b.id) * mult;
+      }
+      if (sortBy === 'amount') {
+        return (getTxnAmount(a) - getTxnAmount(b)) * mult;
+      }
+      if (sortBy === 'payee') {
+        return (a.payee ?? '').localeCompare(b.payee ?? '') * mult;
+      }
+      if (sortBy === 'category') {
+        return getTxnCategory(a).localeCompare(getTxnCategory(b)) * mult;
+      }
+      return 0;
+    });
+  }, [txns, kindFilter, sortBy, sortDir, catNameById]);
 
   const handleQuickAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
-    const amountInPaise = Math.round(parseFloat(amount) * 100);
-    
-    const { data: txn, error: txnError } = await supabase
-      .from('transactions')
-      .insert([{ 
-        txn_date: txnDate, 
-        payee: txnType === 'transfer' ? 'Internal Transfer' : payee, 
-        narration: `Manual-${payee || 'Transfer'}` 
-      }])
-      .select().single();
+    setStatus(null);
 
-    if (!txnError && txn) {
-      if (txnType === 'expense') {
-        await supabase.from('postings').insert([
-          { txn_id: txn.id, account_id: parseInt(selectedAccountId), amount_minor: -amountInPaise },
-          { txn_id: txn.id, account_id: sysExpenseAcc, category_id: parseInt(selectedCategoryId), amount_minor: amountInPaise }
-        ]);
-      } else if (txnType === 'income') {
-        await supabase.from('postings').insert([
-          { txn_id: txn.id, account_id: parseInt(selectedAccountId), amount_minor: amountInPaise },
-          { txn_id: txn.id, account_id: sysIncomeAcc, category_id: parseInt(selectedCategoryId), amount_minor: -amountInPaise }
-        ]);
-      } else {
-        await supabase.from('postings').insert([
-          { txn_id: txn.id, account_id: parseInt(fromAccountId), amount_minor: -amountInPaise },
-          { txn_id: txn.id, account_id: parseInt(toAccountId), amount_minor: amountInPaise }
-        ]);
-      }
-      setPayee(''); setAmount(''); fetchInitialData();
+    let minor: number;
+    try {
+      minor = Math.abs(parseMoneyToMinor(amount));
+      if (minor === 0) throw new Error('Amount must be greater than zero.');
+    } catch (err) {
+      setStatus({ kind: 'error', msg: err instanceof Error ? err.message : String(err) });
+      return;
     }
+
+    let postings: { account_id: number; amount_minor: number; category_id: number | null }[] = [];
+
+    if (txnType === 'expense') {
+      if (!accountId || !sysExpenseAcc) {
+        setStatus({ kind: 'error', msg: 'Select an account (and ensure system accounts exist).' });
+        return;
+      }
+      postings = [
+        { account_id: Number(accountId), amount_minor: -minor, category_id: null },
+        { account_id: sysExpenseAcc, amount_minor: minor, category_id: categoryId ? Number(categoryId) : null },
+      ];
+    } else if (txnType === 'income') {
+      if (!accountId || !sysIncomeAcc) {
+        setStatus({ kind: 'error', msg: 'Select an account (and ensure system accounts exist).' });
+        return;
+      }
+      postings = [
+        { account_id: Number(accountId), amount_minor: minor, category_id: null },
+        { account_id: sysIncomeAcc, amount_minor: -minor, category_id: categoryId ? Number(categoryId) : null },
+      ];
+    } else {
+      if (!fromId || !toId || fromId === toId) {
+        setStatus({ kind: 'error', msg: 'Choose two different accounts for a transfer.' });
+        return;
+      }
+      postings = [
+        { account_id: Number(fromId), amount_minor: -minor, category_id: null },
+        { account_id: Number(toId), amount_minor: minor, category_id: null },
+      ];
+    }
+
+    setIsSubmitting(true);
+    const { error } = await supabase().rpc('create_transaction', {
+      p_date: txnDate,
+      p_payee: txnType === 'transfer' ? 'Internal Transfer' : payee.trim(),
+      p_narration: `Manual-${payee.trim() || 'Transfer'}`,
+      p_kind: txnType,
+      p_postings: postings,
+      p_notes: null,
+    });
     setIsSubmitting(false);
+
+    if (error) {
+      setStatus({ kind: 'error', msg: error.message });
+      return;
+    }
+
+    setPayee('');
+    setAmount('');
+    setStatus({ kind: 'success', msg: 'Transaction recorded.' });
+    await refreshAll();
   };
 
-  const handleDeleteTransaction = async (txnId: number) => {
-    if (!window.confirm('Delete this transaction?')) return;
-    await supabase.from('postings').delete().eq('txn_id', txnId);
-    await supabase.from('transactions').delete().eq('id', txnId);
-    fetchInitialData();
+  const voidIds = async (ids: number[], reason: string) => {
+    if (!ids.length) return;
+    const { data, error } = await supabase().rpc('void_transactions', {
+      p_ids: ids,
+      p_reason: reason,
+    });
+    if (error) {
+      setStatus({ kind: 'error', msg: `Void failed: ${error.message}` });
+      return;
+    }
+    const count = Number(data ?? 0);
+    setStatus({ kind: 'success', msg: `Voided ${count} transaction(s).` });
+    await refreshAll();
   };
 
-  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.checked) setSelectedTxnIds(transactions.map(t => t.id));
-    else setSelectedTxnIds([]);
+  const toggleAll = (checked: boolean) => {
+    setSelectedIds(checked ? visibleTxns.map(t => t.id) : []);
   };
 
-  const handleSelectTxn = (id: number, checked: boolean) => {
-    if (checked) setSelectedTxnIds(prev => [...prev, id]);
-    else setSelectedTxnIds(prev => prev.filter(txnId => txnId !== id));
+  const toggleOne = (id: number, checked: boolean) => {
+    setSelectedIds(prev => (checked ? [...prev, id] : prev.filter(x => x !== id)));
   };
 
-  const handleBulkDelete = async () => {
-    if (!window.confirm(`Delete ${selectedTxnIds.length} transactions?`)) return;
-    await supabase.from('postings').delete().in('txn_id', selectedTxnIds);
-    await supabase.from('transactions').delete().in('id', selectedTxnIds);
-    fetchInitialData();
-  };
-
-  const COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444', '#06b6d4', '#f43f5e'];
+  const rangePills = (
+    <div className="hide-scrollbar flex max-w-full overflow-x-auto rounded-lg border border-gray-800 bg-gray-950/60 p-1">
+      {RANGE_KEYS.map(k => (
+        <button
+          key={k}
+          type="button"
+          onClick={() => setTimeRange(k)}
+          className={`min-h-9 shrink-0 whitespace-nowrap rounded-md px-3 text-xs font-semibold capitalize transition-colors ${
+            timeRange === k ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+          }`}
+        >
+          {k}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-gray-900 text-gray-100 p-8 font-sans">
-      <div className="max-w-6xl mx-auto flex flex-col gap-8">
-        
-        {/* Dynamic Header */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-white">
-              Dashboard {headerTitle && <span className="text-blue-400">/ {headerTitle}</span>}
-            </h1>
-            <p className="text-gray-400 text-sm mt-1">Personal Finance Analytics</p>
-          </div>
-          
-          <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-end">
-            <div className="flex overflow-x-auto bg-gray-900 rounded-lg p-1 border border-gray-700 max-w-full hide-scrollbar">
-              {['daily', 'weekly', 'monthly', 'yearly', 'all'].map(t => (
-                <button 
-                  key={t}
-                  onClick={() => setTimeRange(t as any)}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded capitalize transition-colors ${timeRange === t ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <a href="/reports" className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2 px-4 rounded-lg transition-colors text-sm">
-                📊 Reports
-              </a>
-              <a href="/settings" className="bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded-lg transition-colors text-sm">
-                ⚙️
-              </a>
-            </div>
-          </div>
-        </div>
+    <AppShell title="Dashboard" subtitle={range?.label ?? 'Loading…'} actions={rangePills}>
+      {status ? <div className="mb-4"><Banner kind={status.kind}>{status.msg}</Banner></div> : null}
 
-        {!isLoading && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg flex flex-col items-center">
-              <h2 className="text-lg font-bold text-gray-200 w-full mb-4">Expenses by Category</h2>
-              {expenseChartData.length > 0 ? (
-                <div className="w-full h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={expenseChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={90} paddingAngle={5} dataKey="value">
-                        {expenseChartData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: any) => value != null ? `₹${Number(value).toLocaleString('en-IN')}` : ''} contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }} />
-                      <Legend verticalAlign="bottom" height={36} />
-                    </PieChart>
-                  </ResponsiveContainer>
+      <div className="flex flex-col gap-4 sm:gap-6">
+        {balances.length > 0 ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4">
+            {balances.map(b => {
+              const displayMinor = b.type === 'liability' ? -b.balance_minor : b.balance_minor;
+              return (
+                <div key={b.id} className="min-w-0 rounded-xl border border-gray-800 bg-gray-800/60 p-4">
+                  <div className="truncate text-xs text-gray-400">{b.name}</div>
+                  <div className="tabular mt-1 truncate text-lg font-bold text-white sm:text-xl">
+                    {formatINR(displayMinor)}
+                  </div>
                 </div>
-              ) : (
-                <div className="flex-1 flex items-center justify-center text-gray-500 text-sm">No expenses found for this period.</div>
-              )}
-            </div>
-
-            <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg flex flex-col">
-              <h2 className="text-lg font-bold text-gray-200 w-full mb-4">Cash Flow Overview</h2>
-              <div className="w-full h-64 mt-4">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={cashFlowData} margin={{ top: 10, right: 10, left: 30, bottom: 0 }}>
-                    <XAxis dataKey="name" stroke="#9ca3af" fontSize={12} />
-                    <YAxis stroke="#9ca3af" fontSize={12} tickFormatter={(val) => `₹${val.toLocaleString('en-IN')}`} />
-                    <Tooltip cursor={{ fill: '#374151' }} formatter={(value) => `₹${Number(value ?? 0).toLocaleString('en-IN')}`} contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' }} />
-                    <Bar dataKey="Income" fill="#10b981" radius={[4, 4, 0, 0]} barSize={50} />
-                    <Bar dataKey="Expense" fill="#ef4444" radius={[4, 4, 0, 0]} barSize={50} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
+              );
+            })}
           </div>
-        )}
+        ) : null}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {balances.filter(b => b.type !== 'expense' && b.type !== 'income').map((bal) => (
-            <div key={bal.id} className="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg">
-              <h3 className="text-gray-400 text-sm font-medium">{bal.name}</h3>
-              <div className="text-2xl font-bold mt-1 font-mono">
-                ₹{(bal.type === 'liability' ? -(bal.balance_minor/100) : bal.balance_minor/100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+        <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-3">
+          <div className="flex min-w-0 flex-col gap-4 sm:gap-6">
+            <Card>
+              <CardTitle>Quick entry</CardTitle>
+              <div className="mb-4 flex rounded-lg border border-gray-700 bg-gray-900 p-1">
+                {(['income', 'expense', 'transfer'] as TxnType[]).map(t => {
+                  const activeTone =
+                    t === 'income' ? 'bg-emerald-600 text-white'
+                    : t === 'expense' ? 'bg-blue-600 text-white'
+                    : 'bg-purple-600 text-white';
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setTxnType(t)}
+                      className={`min-h-9 flex-1 rounded-md text-xs font-semibold capitalize transition-colors ${
+                        txnType === t ? activeTone : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  );
+                })}
               </div>
-            </div>
-          ))}
-        </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          <div className="flex flex-col gap-8">
-            
-            <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg h-fit">
-              <div className="flex bg-gray-900 rounded-lg p-1 mb-6 border border-gray-700">
-                <button type="button" onClick={() => setTxnType('income')} className={`flex-1 py-1.5 text-sm font-semibold rounded-md transition-colors ${txnType === 'income' ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:text-white'}`}>Income</button>
-                <button type="button" onClick={() => setTxnType('expense')} className={`flex-1 py-1.5 text-sm font-semibold rounded-md transition-colors ${txnType === 'expense' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Expense</button>
-                <button type="button" onClick={() => setTxnType('transfer')} className={`flex-1 py-1.5 text-sm font-semibold rounded-md transition-colors ${txnType === 'transfer' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}`}>Transfer</button>
-              </div>
+              <form onSubmit={handleQuickAdd} className="space-y-3">
+                <Field label="Date" htmlFor="qa-date">
+                  <input id="qa-date" type="date" required value={txnDate}
+                         onChange={e => setTxnDate(e.target.value)} className={inputCls} />
+                </Field>
+                <Field label="Amount (₹)" htmlFor="qa-amount">
+                  <input id="qa-amount" type="text" inputMode="decimal" required value={amount}
+                         onChange={e => setAmount(e.target.value)} placeholder="0.00" className={inputCls} />
+                </Field>
 
-              <form onSubmit={handleQuickAdd} className="space-y-4">
-                <input type="date" required className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white text-sm" value={txnDate} onChange={(e) => setTxnDate(e.target.value)} />
-                <input type="number" step="0.01" required className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount (₹)" />
-                
-                {(txnType === 'expense' || txnType === 'income') ? (
+                {txnType !== 'transfer' ? (
                   <>
-                    <input type="text" required className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white" value={payee} onChange={(e) => setPayee(e.target.value)} placeholder="Payee" />
-                    <select className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white" value={selectedAccountId} onChange={(e) => setSelectedAccountId(e.target.value)}>
-                      {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
-                    </select>
-                    <select className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white" value={selectedCategoryId} onChange={(e) => setSelectedCategoryId(e.target.value)}>
-                      {categories.filter(c => c.kind === txnType).map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
-                    </select>
+                    <Field label="Payee" htmlFor="qa-payee">
+                      <input id="qa-payee" type="text" required value={payee}
+                             onChange={e => setPayee(e.target.value)} placeholder="Merchant or person" className={inputCls} />
+                    </Field>
+                    <Field label="Account" htmlFor="qa-account">
+                      <select id="qa-account" value={accountId}
+                              onChange={e => setAccountId(e.target.value)} className={inputCls}>
+                        {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Category" htmlFor="qa-category">
+                      <select id="qa-category" value={categoryId}
+                              onChange={e => setCategoryId(e.target.value)} className={inputCls}>
+                        {categories.filter(c => c.kind === txnType).map(c => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </Field>
                   </>
                 ) : (
                   <>
-                    <div>
-                      <label className="block text-xs text-gray-400 mb-1">From Account</label>
-                      <select className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white" value={fromAccountId} onChange={(e) => setFromAccountId(e.target.value)}>
-                        {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
+                    <Field label="From account" htmlFor="qa-from">
+                      <select id="qa-from" value={fromId}
+                              onChange={e => setFromId(e.target.value)} className={inputCls}>
+                        {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                       </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-400 mb-1">To Account</label>
-                      <select className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white" value={toAccountId} onChange={(e) => setToAccountId(e.target.value)}>
-                        {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
+                    </Field>
+                    <Field label="To account" htmlFor="qa-to">
+                      <select id="qa-to" value={toId}
+                              onChange={e => setToId(e.target.value)} className={inputCls}>
+                        {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                       </select>
-                    </div>
+                    </Field>
                   </>
                 )}
-                <button type="submit" disabled={isSubmitting} className={`w-full font-bold py-2 rounded transition-colors disabled:opacity-50 ${txnType === 'income' ? 'bg-emerald-600 hover:bg-emerald-500' : txnType === 'expense' ? 'bg-blue-600 hover:bg-blue-500' : 'bg-purple-600 hover:bg-purple-500'}`}>
-                  {isSubmitting ? 'Saving...' : txnType === 'income' ? 'Add Income' : txnType === 'expense' ? 'Add Expense' : 'Log Transfer'}
+
+                <button type="submit" disabled={isSubmitting} className={btn('primary', 'w-full')}>
+                  {isSubmitting ? 'Saving…' : txnType === 'income' ? 'Add income' : txnType === 'expense' ? 'Add expense' : 'Record transfer'}
                 </button>
               </form>
-            </div>
+            </Card>
 
-            <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg h-fit border-dashed">
-              <h2 className="text-xl font-bold mb-2">Bulk Import Bank CSV</h2>
-              <p className="text-xs text-gray-400 mb-4">CSV must have headers: Date, Narration, Amount</p>
-              <div className="mb-4">
-                <label className="block text-sm text-gray-300 mb-1 font-semibold">Importing into:</label>
-                <select className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white outline-none focus:border-blue-500" value={csvAccountId} onChange={(e) => setCsvAccountId(e.target.value)}>
-                  {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
-                </select>
-              </div>
-              <input type="file" accept=".csv" onChange={handleCSVUpload} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-500 cursor-pointer" />
-              {importStatus && <div className={`mt-4 text-sm font-mono ${importStatus.includes('❌') ? 'text-red-400' : 'text-emerald-400'}`}>{importStatus}</div>}
-            </div>
+            <CsvImport onImported={refreshAll} />
           </div>
 
-          <div className="md:col-span-2 bg-gray-800 rounded-xl border border-gray-700 shadow-lg overflow-hidden h-fit">
-            <div className="p-4 border-b border-gray-700 bg-gray-900/50 flex justify-between items-center h-16">
-              <h2 className="font-semibold text-gray-200">Transactions</h2>
-              {selectedTxnIds.length > 0 && (
-                <button onClick={handleBulkDelete} className="bg-red-900/50 hover:bg-red-900 text-red-400 hover:text-white border border-red-800 px-4 py-1.5 rounded text-sm transition-colors font-medium">
-                  Delete Selected ({selectedTxnIds.length})
-                </button>
-              )}
-            </div>
-            {isLoading ? <div className="p-8 text-center text-gray-500 animate-pulse">Loading secure ledger...</div> : (
-              <div className="overflow-x-auto w-full">
-                <table className="w-full min-w-[600px] text-left border-collapse">
-                <thead>
-                  <tr className="bg-gray-900/50 text-gray-400 text-sm border-b border-gray-700">
-                    <th className="p-4 w-12"><input type="checkbox" className="accent-blue-500 w-4 h-4 rounded cursor-pointer" onChange={handleSelectAll} checked={transactions.length > 0 && selectedTxnIds.length === transactions.length} /></th>
-                    <th className="p-4">Date</th>
-                    <th className="p-4">Payee / Narration</th>
-                    <th className="p-4">Impact</th>
-                    <th className="p-4"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {transactions.map((txn) => (
-                    <tr key={txn.id} className={`border-b border-gray-700/50 hover:bg-gray-700/20 group transition-colors ${selectedTxnIds.includes(txn.id) ? 'bg-blue-900/10' : ''}`}>
-                      <td className="p-4"><input type="checkbox" className="accent-blue-500 w-4 h-4 rounded cursor-pointer" checked={selectedTxnIds.includes(txn.id)} onChange={(e) => handleSelectTxn(txn.id, e.target.checked)} /></td>
-                      <td className="p-4 text-sm text-gray-300 font-mono">{txn.txn_date}</td>
-                      <td className="p-4 font-medium text-gray-200">
-                        {txn.payee}
-                        <div className="text-xs text-gray-500 font-mono mt-1">{txn.notes || txn.narration}</div>
-                      </td>
-                      <td className="p-4 text-sm">
-                        {txn.postings.map((post: any, i: number) => {
-                          const amt = post.amount_minor / 100; 
-                          const isSystemAcc = post.accounts?.type === 'expense' || post.accounts?.type === 'income';
-                          const colorClass = isSystemAcc ? 'text-gray-500' : (amt < 0 ? 'text-red-400' : 'text-emerald-400');
-                          return (
-                            <div key={i} className="flex justify-between w-48 mb-1">
-                              <span className="text-gray-400 truncate pr-2">{post.accounts.name}:</span>
-                              <span className={`font-mono ${colorClass}`}>{amt < 0 ? '' : '+'}{amt.toFixed(2)}</span>
+          <div className="min-w-0 lg:col-span-2">
+            <Card className="p-0 sm:p-0">
+              {/* Header + Filter & Sort Controls */}
+              <div className="flex flex-col gap-3 border-b border-gray-800 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-base font-semibold text-gray-100 sm:text-lg">
+                    Transactions ({visibleTxns.length})
+                  </h2>
+                  {selectedIds.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => voidIds(selectedIds, 'bulk void')}
+                      className={btn('danger', 'text-xs')}
+                    >
+                      Void selected ({selectedIds.length})
+                    </button>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  {/* Type toggle: All / Expense / Income / Transfer */}
+                  <div className="flex rounded-lg border border-gray-700 bg-gray-900 p-0.5">
+                    {(['all', 'expense', 'income', 'transfer'] as KindFilter[]).map(k => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => setKindFilter(k)}
+                        className={`min-h-8 rounded-md px-2.5 text-xs font-semibold capitalize transition-colors ${
+                          kindFilter === k ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+                        }`}
+                      >
+                        {k}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Sort controls */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-gray-400">Sort:</span>
+                    <select
+                      aria-label="Sort transactions by"
+                      value={sortBy}
+                      onChange={e => setSortBy(e.target.value as SortField)}
+                      className="min-h-8 rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs text-white"
+                    >
+                      <option value="date">Date</option>
+                      <option value="amount">Amount</option>
+                      <option value="payee">Payee</option>
+                      <option value="category">Category</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))}
+                      title={sortDir === 'asc' ? 'Ascending' : 'Descending'}
+                      className="min-h-8 rounded-lg border border-gray-700 bg-gray-900 px-2.5 text-xs font-bold text-gray-300 hover:text-white"
+                    >
+                      {sortDir === 'asc' ? '↑ Asc' : '↓ Desc'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {isLoading ? (
+                <div className="p-8 text-center text-sm text-gray-500">Loading secure ledger…</div>
+              ) : visibleTxns.length === 0 ? (
+                <div className="p-8 text-center text-sm text-gray-500">No transactions match this filter.</div>
+              ) : (
+                <>
+                  <ul className="divide-y divide-gray-800 sm:hidden">
+                    {visibleTxns.map(t => {
+                      const catLeg = t.postings.find(p => p.category_id != null);
+                      const catLabel = catLeg?.category_id ? catNameById[catLeg.category_id] : (t.kind === 'transfer' ? 'Transfer' : null);
+                      return (
+                        <li key={t.id} className="flex items-start justify-between gap-2 p-3.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="truncate text-sm font-medium text-gray-100">{t.payee || '—'}</span>
+                              <span className="tabular shrink-0 text-xs text-gray-400">{t.txn_date}</span>
                             </div>
+                            {catLabel ? (
+                              <span className="mt-0.5 inline-block rounded bg-gray-900 px-1.5 py-0.5 text-[10px] text-blue-300">
+                                {catLabel}
+                              </span>
+                            ) : null}
+                            {t.notes || t.narration ? (
+                              <div className="mt-0.5 truncate font-mono text-[11px] text-gray-400">{t.notes || t.narration}</div>
+                            ) : null}
+                            <PostingAmounts postings={t.postings} compact />
+                          </div>
+                          <div className="flex shrink-0 items-center">
+                            <button
+                              type="button"
+                              onClick={() => setEditingTxn(t)}
+                              aria-label="Edit transaction"
+                              className="min-h-10 min-w-10 rounded text-gray-400 hover:text-blue-400"
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => voidIds([t.id], 'manual void')}
+                              aria-label="Void transaction"
+                              className="min-h-10 min-w-10 rounded text-gray-400 hover:text-red-400"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
+                  <div className="hidden overflow-x-auto sm:block">
+                    <table className="w-full min-w-[640px] border-collapse text-left">
+                      <thead>
+                        <tr className="border-b border-gray-800 bg-gray-900/50 text-xs text-gray-400">
+                          <th className="w-10 p-3">
+                            <input
+                              type="checkbox"
+                              aria-label="Select all transactions"
+                              className="h-4 w-4 cursor-pointer rounded accent-blue-500"
+                              checked={visibleTxns.length > 0 && selectedIds.length === visibleTxns.length}
+                              onChange={e => toggleAll(e.target.checked)}
+                            />
+                          </th>
+                          <th className="p-3">Date</th>
+                          <th className="p-3">Payee / Category</th>
+                          <th className="p-3">Postings</th>
+                          <th className="w-24 p-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleTxns.map(t => {
+                          const catLeg = t.postings.find(p => p.category_id != null);
+                          const catLabel = catLeg?.category_id ? catNameById[catLeg.category_id] : (t.kind === 'transfer' ? 'Transfer' : null);
+                          return (
+                            <tr key={t.id} className="group border-b border-gray-800/60 hover:bg-gray-700/20">
+                              <td className="p-3">
+                                <input
+                                  type="checkbox"
+                                  aria-label="Select transaction"
+                                  className="h-4 w-4 cursor-pointer rounded accent-blue-500"
+                                  checked={selectedIds.includes(t.id)}
+                                  onChange={e => toggleOne(t.id, e.target.checked)}
+                                />
+                              </td>
+                              <td className="tabular whitespace-nowrap p-3 text-sm text-gray-300">{t.txn_date}</td>
+                              <td className="p-3">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-medium text-gray-100">{t.payee || '—'}</span>
+                                  {catLabel ? (
+                                    <span className="rounded bg-gray-900 px-1.5 py-0.5 text-[10px] font-medium text-blue-300">
+                                      {catLabel}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="max-w-xs truncate font-mono text-[11px] text-gray-400">{t.notes || t.narration}</div>
+                              </td>
+                              <td className="p-3">
+                                <PostingAmounts postings={t.postings} />
+                              </td>
+                              <td className="p-3 text-right">
+                                <div className="inline-flex items-center justify-end gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingTxn(t)}
+                                    title="Edit Transaction"
+                                    className="min-h-9 min-w-9 rounded text-gray-400 hover:bg-gray-700 hover:text-blue-400"
+                                  >
+                                    ✏️
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => voidIds([t.id], 'manual void')}
+                                    title="Void Transaction"
+                                    className="min-h-9 min-w-9 rounded text-gray-400 hover:bg-gray-700 hover:text-red-400"
+                                  >
+                                    🗑️
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
                           );
                         })}
-                      </td>
-                      <td className="p-4 text-right">
-                        <button onClick={() => handleDeleteTransaction(txn.id)} className="text-gray-600 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100" title="Void Transaction">🗑️</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {hasMore ? (
+                    <div className="border-t border-gray-800 p-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => void loadTxns(txns.length)}
+                        className={btn('neutral', 'text-xs')}
+                      >
+                        Load more
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </Card>
           </div>
         </div>
+
+        <CashflowCharts summary={summary} />
       </div>
+
+      <EditTxnModal
+        txn={editingTxn}
+        accounts={accounts}
+        categories={categories}
+        sysExpenseAcc={sysExpenseAcc}
+        sysIncomeAcc={sysIncomeAcc}
+        onClose={() => setEditingTxn(null)}
+        onSaved={refreshAll}
+      />
+    </AppShell>
+  );
+}
+
+function PostingAmounts({
+  postings, compact = false,
+}: { postings: TxnRow['postings']; compact?: boolean }) {
+  return (
+    <div className={compact ? 'mt-1 space-y-0.5' : 'space-y-0.5'}>
+      {postings.map(p => {
+        const isSystem = p.accounts?.type === 'expense' || p.accounts?.type === 'income';
+        const cls = isSystem ? 'text-gray-500' : p.amount_minor < 0 ? 'text-red-400' : 'text-emerald-400';
+        return (
+          <div key={p.id} className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0 truncate text-xs text-gray-400">{p.accounts?.name ?? '—'}</span>
+            <span className={`tabular shrink-0 text-xs font-medium ${cls}`}>
+              {formatINRSigned(p.amount_minor)}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

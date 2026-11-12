@@ -1,9 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useState, type ReactNode } from 'react';
-import { supabase } from '@/lib/supabase';
+import { usePathname } from 'next/navigation';
+import { useEffect, type ReactNode } from 'react';
 
 const TABS = [
   { href: '/', label: 'Home', icon: '🏠' },
@@ -15,42 +14,12 @@ export default function AppShell({
   title, subtitle, actions, children,
 }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
-  const [state, setState] = useState<'checking' | 'ready'>('checking');
-
-  useEffect(() => {
-    const db = supabase();
-    let alive = true;
-
-    db.auth.getSession().then(async ({ data }) => {
-      if (!alive) return;
-      if (!data.session) { router.replace('/login'); return; }
-      // Idempotent: guarantees system income/expense accounts + fallback categories.
-      const { error } = await db.rpc('ensure_defaults');
-      if (error) console.error('ensure_defaults', error.message);
-      if (alive) setState('ready');
-    });
-
-    const { data: sub } = db.auth.onAuthStateChange((_event, session) => {
-      if (!session) router.replace('/login');
-    });
-
-    return () => { alive = false; sub.subscription.unsubscribe(); };
-  }, [router]);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== 'production') return;
     if (!('serviceWorker' in navigator)) return;
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }, []);
-
-  if (state !== 'ready') {
-    return (
-      <div className="flex min-h-dvh items-center justify-center bg-gray-900 text-sm text-gray-400">
-        Loading…
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-dvh bg-gray-900 text-gray-100" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
