@@ -40,7 +40,7 @@ export default function Home() {
 
   // Hydration-safe init
   useEffect(() => {
-    setTxnDate(new Date().toISOString().split('T')[0]);
+    setTxnDate(new Date().toLocaleDateString('en-CA'));   // ✅ local, YYYY-MM-DD
   }, []);
 
   useEffect(() => {
