@@ -5,6 +5,8 @@ import AppShell from '@/components/AppShell';
 import CashflowCharts from '@/components/CashflowCharts';
 import CsvImport from '@/components/CsvImport';
 import EditTxnModal from '@/components/EditTxnModal';
+import AccountCards from '@/components/AccountCards';
+import type { CardSummary } from '@/lib/creditCard';
 import { Banner, Card, CardTitle, Field, btn, inputCls } from '@/components/ui';
 import { rangeFor, type RangeKey } from '@/lib/dates';
 import { formatINR, formatINRSigned, parseMoneyToMinor } from '@/lib/money';
@@ -25,7 +27,9 @@ export default function Home() {
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [balances, setBalances] = useState<BalanceRow[]>([]);
+  const [cards, setCards] = useState<CardSummary[]>([]);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  
   const [txns, setTxns] = useState<TxnRow[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -46,6 +50,8 @@ export default function Home() {
   const [sortBy, setSortBy] = useState<SortField>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [editingTxn, setEditingTxn] = useState<TxnRow | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+ 
 
   // Quick add
   const [txnType, setTxnType] = useState<TxnType>('expense');
@@ -80,12 +86,13 @@ export default function Home() {
 
   const loadReference = useCallback(async () => {
     const db = supabase();
-    const [accRes, catRes, balRes] = await Promise.all([
+    const [accRes, catRes, balRes, cardRes] = await Promise.all([
       db.from('accounts')
         .select('id,name,type,subtype,currency,is_active,credit_limit_minor,statement_day,due_day')
         .eq('is_active', true).order('name'),
       db.from('categories').select('id,name,kind,parent_id,is_active').eq('is_active', true).order('name'),
       db.from('account_balances').select('id,name,type,subtype,balance_minor,is_active'),
+      db.rpc('credit_card_summary'),
     ]);
 
     const all = (accRes.data ?? []) as AccountRow[];
@@ -95,6 +102,8 @@ export default function Home() {
     setSysIncomeAcc(all.find(a => a.type === 'income')?.id ?? null);
     setCategories((catRes.data ?? []) as CategoryRow[]);
     setBalances(((balRes.data ?? []) as BalanceRow[]).filter(b => b.type !== 'income' && b.type !== 'expense' && b.type !== 'equity' && b.is_active));
+    
+    setCards(Array.isArray(cardRes.data) ? (cardRes.data as CardSummary[]) : []);
 
     if (disp.length) {
       setAccountId(prev => prev || String(disp[0].id));
@@ -152,7 +161,7 @@ export default function Home() {
     const getTxnAmount = (t: TxnRow) => {
       const nonSys = t.postings.find(p => p.accounts?.type !== 'expense' && p.accounts?.type !== 'income');
       return Math.abs(nonSys?.amount_minor ?? t.postings[0]?.amount_minor ?? 0);
-    };
+    }
     const getTxnCategory = (t: TxnRow) => {
       const catLeg = t.postings.find(p => p.category_id != null);
       if (catLeg?.category_id && catNameById[catLeg.category_id]) return catNameById[catLeg.category_id];
@@ -160,8 +169,23 @@ export default function Home() {
     };
 
     const filtered = txns.filter(t => {
-      if (kindFilter === 'all') return true;
-      return t.kind === kindFilter;
+      // 1. Filter by kind
+      if (kindFilter !== 'all' && t.kind !== kindFilter) return false;
+
+      // 2. Filter by search query
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const payeeMatch = (t.payee || '').toLowerCase().includes(q);
+        const catMatch = getTxnCategory(t).toLowerCase().includes(q);
+        const noteMatch = (t.notes || t.narration || '').toLowerCase().includes(q);
+        
+        // Convert minor units back to standard format for searching (e.g., 50000 -> "500")
+        const amountMatch = (getTxnAmount(t) / 100).toString().includes(q);
+
+        return payeeMatch || catMatch || noteMatch || amountMatch;
+      }
+      
+      return true;
     });
 
     const mult = sortDir === 'asc' ? 1 : -1;
@@ -181,8 +205,7 @@ export default function Home() {
       }
       return 0;
     });
-  }, [txns, kindFilter, sortBy, sortDir, catNameById]);
-
+  }, [txns, kindFilter, sortBy, sortDir, catNameById, searchQuery]);
   const handleQuickAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatus(null);
@@ -274,6 +297,7 @@ export default function Home() {
 
   const rangePills = (
     <div className="hide-scrollbar flex max-w-full overflow-x-auto rounded-lg border border-gray-800 bg-gray-950/60 p-1">
+      
       {RANGE_KEYS.map(k => (
         <button
           key={k}
@@ -288,27 +312,13 @@ export default function Home() {
       ))}
     </div>
   );
-
+    
   return (
     <AppShell title="Dashboard" subtitle={range?.label ?? 'Loading…'} actions={rangePills}>
       {status ? <div className="mb-4"><Banner kind={status.kind}>{status.msg}</Banner></div> : null}
 
       <div className="flex flex-col gap-4 sm:gap-6">
-        {balances.length > 0 ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4">
-            {balances.map(b => {
-              const displayMinor = b.type === 'liability' ? -b.balance_minor : b.balance_minor;
-              return (
-                <div key={b.id} className="min-w-0 rounded-xl border border-gray-800 bg-gray-800/60 p-4">
-                  <div className="truncate text-xs text-gray-400">{b.name}</div>
-                  <div className="tabular mt-1 truncate text-lg font-bold text-white sm:text-xl">
-                    {formatINR(displayMinor)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : null}
+        <AccountCards accounts={accounts} balances={balances} cards={cards} today={today} />
 
         <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-3">
           <div className="flex min-w-0 flex-col gap-4 sm:gap-6">
@@ -427,6 +437,21 @@ export default function Home() {
                       </button>
                     ))}
                   </div>
+
+                  <input
+                      type="search"
+                      placeholder="Search transactions..."
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      className="min-h-8 w-full rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs text-white placeholder-gray-500 sm:w-48"
+                    />
+                  </div>
+
+                  {/* Sort controls */}
+                  <div className="flex items-center gap-1.5">
+                  
+                  
+                  
 
                   {/* Sort controls */}
                   <div className="flex items-center gap-1.5">

@@ -1,26 +1,38 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppShell from '@/components/AppShell';
 import CashflowCharts from '@/components/CashflowCharts';
+import CategoryTrend from '@/components/CategoryTrend';
+import InvestmentsPanel from '@/components/InvestmentsPanel';
 import EditTxnModal from '@/components/EditTxnModal';
+import ReportFilters from '@/components/ReportFilters';
 import { Banner, Card, CardTitle, Field, btn, inputCls } from '@/components/ui';
 import { dayRange, monthRange, yearRange, type DateRange } from '@/lib/dates';
 import { formatINR, formatINRSigned } from '@/lib/money';
+import {
+  EMPTY_FILTERS, activeFilterCount, filterLabel, idsOrNull, rangesToPayload, spanOf,
+  type ReportFilterState,
+} from '@/lib/reportFilters';
 import { supabase } from '@/lib/supabase';
-import type { AccountRow, CategoryRow, DashboardSummary, TxnRow } from '@/lib/types';
+import type {
+  AccountRow, CategoryRow, CategoryTrend as TrendData, DashboardSummary, InvestmentTrend, TxnRow,
+} from '@/lib/types';
 import { useToday } from '@/lib/use-today';
 
 type Mode = 'months' | 'range' | 'years' | 'days';
 type KindFilter = 'all' | 'expense' | 'income' | 'transfer';
 type SortField = 'date' | 'amount' | 'payee' | 'category';
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const LIST_LIMIT = 500;
 
 export default function Reports() {
   const today = useToday();
   const nowYear = today ? Number(today.slice(0, 4)) : null;
   const [mode, setMode] = useState<Mode>('months');
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [trend, setTrend] = useState<TrendData | null>(null);
+  const [invTrend, setInvTrend] = useState<InvestmentTrend | null>(null);
   const [txns, setTxns] = useState<TxnRow[]>([]);
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -29,11 +41,15 @@ export default function Reports() {
   const [isLoading, setIsLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // Filter, Sort & Edit
+  // Account / category filters (applied in SQL)
+  const [filters, setFilters] = useState<ReportFilterState>(EMPTY_FILTERS);
+
+  // List-only: kind filter, sort & edit
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [sortBy, setSortBy] = useState<SortField>('date');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [editingTxn, setEditingTxn] = useState<TxnRow | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const [rangeFrom, setRangeFrom] = useState('');
   const [rangeTo, setRangeTo] = useState('');
@@ -42,6 +58,10 @@ export default function Reports() {
   const [years, setYears] = useState<number[]>([]);
   const [dayInput, setDayInput] = useState('');
   const [days, setDays] = useState<DateRange[]>([]);
+
+  // Newest request wins; older responses are ignored.
+  const mainReq = useRef(0);
+  const sideReq = useRef(0);
 
   useEffect(() => {
     if (!today) return;
@@ -63,6 +83,9 @@ export default function Reports() {
     return [{ from: rangeFrom || null, to: rangeTo || null, label: 'Custom range' }];
   }, [mode, months, years, days, rangeFrom, rangeTo]);
 
+  const payload = useMemo(() => rangesToPayload(ranges), [ranges]);
+  const span = useMemo(() => spanOf(payload), [payload]);
+
   const catNameById = useMemo(() => {
     const m: Record<number, string> = {};
     categories.forEach(c => { m[c.id] = c.name; });
@@ -78,52 +101,109 @@ export default function Reports() {
   const toggleYear = (y: number) =>
     setYears(prev => (prev.includes(y) ? prev.filter(x => x !== y) : [...prev, y].sort()));
 
-  const load = useCallback(async () => {
-    if (!today) return;
-    setIsLoading(true);
-    setErr(null);
-    const payload = ranges
-      .filter(r => r.from || r.to)
-      .map(r => ({ from: r.from ?? r.to, to: r.to ?? r.from }));
-
+  // Accounts + categories: loaded once (they feed the filter UI and the edit modal).
+  const loadReference = useCallback(async () => {
     const db = supabase();
-    const [sumRes, txnRes, accRes, catRes] = await Promise.all([
-      db.rpc('dashboard_summary', { p_ranges: payload }),
-      (() => {
-        let q = db
-          .from('transactions')
-          .select('id,txn_date,payee,narration,notes,kind,voided_at,postings(id,txn_id,account_id,amount_minor,category_id,accounts(name,type))')
-          .is('voided_at', null)
-          .neq('kind', 'opening')
-          .order('txn_date', { ascending: false })
-          .order('id', { ascending: false })
-          .limit(500);
-        if (payload.length) {
-          const or = payload
-            .map(r => `and(txn_date.gte.${r.from},txn_date.lte.${r.to})`)
-            .join(',');
-          q = q.or(or);
-        }
-        return q;
-      })(),
+    const [accRes, catRes] = await Promise.all([
       db.from('accounts').select('id,name,type,subtype,currency,is_active,credit_limit_minor,statement_day,due_day').eq('is_active', true).order('name'),
       db.from('categories').select('id,name,kind,parent_id,is_active').eq('is_active', true).order('name'),
     ]);
-
-    if (sumRes.error || txnRes.error) {
-      setErr(sumRes.error?.message ?? txnRes.error?.message ?? 'Unknown error');
+    if (accRes.error || catRes.error) {
+      setErr(accRes.error?.message ?? catRes.error?.message ?? 'Unknown error');
     }
     const allAcc = (accRes.data ?? []) as AccountRow[];
     setAccounts(allAcc.filter(a => a.type !== 'income' && a.type !== 'expense' && a.type !== 'equity'));
     setSysExpenseAcc(allAcc.find(a => a.type === 'expense')?.id ?? null);
     setSysIncomeAcc(allAcc.find(a => a.type === 'income')?.id ?? null);
     setCategories((catRes.data ?? []) as CategoryRow[]);
+  }, []);
+  useEffect(() => { void loadReference(); }, [loadReference]);
+
+  // Summary cards + charts + transaction list: same date ranges and filters, all in SQL.
+  const load = useCallback(async () => {
+    if (!today) return;
+    const my = ++mainReq.current;
+    setIsLoading(true);
+    setErr(null);
+
+    const db = supabase();
+    const accIds = filters.accountIds;
+    const catIds = filters.categoryIds;
+
+    // Extra aliased inner-joins filter the parent rows but keep the full `postings` list intact.
+    const select = [
+      'id,txn_date,payee,narration,notes,kind,voided_at',
+      'postings(id,txn_id,account_id,amount_minor,category_id,accounts(name,type))',
+      accIds.length ? 'fa:postings!inner(account_id)' : '',
+      catIds.length ? 'fc:postings!inner(category_id)' : '',
+    ].filter(Boolean).join(',');
+
+    let q = db
+      .from('transactions')
+      .select(select)
+      .is('voided_at', null)
+      .neq('kind', 'opening')
+      .order('txn_date', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(LIST_LIMIT);
+    if (payload.length) {
+      const or = payload
+        .map(r => `and(txn_date.gte.${r.from},txn_date.lte.${r.to})`)
+        .join(',');
+      q = q.or(or);
+    }
+    if (accIds.length) q = q.in('fa.account_id', accIds);
+    if (catIds.length) q = q.in('fc.category_id', catIds);
+
+    const [sumRes, txnRes] = await Promise.all([
+      db.rpc('dashboard_summary', {
+        p_ranges: payload,
+        p_account_ids: idsOrNull(accIds),
+        p_category_ids: idsOrNull(catIds),
+      }),
+      q,
+    ]);
+    if (my !== mainReq.current) return;
+
+    if (sumRes.error || txnRes.error) {
+      setErr(sumRes.error?.message ?? txnRes.error?.message ?? 'Unknown error');
+    }
     setSummary((sumRes.data as DashboardSummary) ?? null);
     setTxns(((txnRes.data ?? []) as unknown) as TxnRow[]);
     setIsLoading(false);
-  }, [today, ranges]);
-
+  }, [today, payload, filters]);
   useEffect(() => { void load(); }, [load]);
+
+  // Category trend + investment balances: same period and filters.
+  const loadSide = useCallback(async () => {
+    if (!today) return;
+    const my = ++sideReq.current;
+    const db = supabase();
+    const accParam = idsOrNull(filters.accountIds);
+
+    const [trRes, invRes] = await Promise.all([
+      db.rpc('category_trend', {
+        p_from: span?.from ?? null,
+        p_to: span?.to ?? null,
+        p_account_ids: accParam,
+        p_category_ids: idsOrNull(filters.categoryIds),
+        p_ranges: payload,
+      }),
+      db.rpc('investment_trend', {
+        p_from: span?.from ?? null,
+        p_to: span?.to ?? null,
+        p_account_ids: accParam,
+      }),
+    ]);
+    if (my !== sideReq.current) return;
+
+    if (trRes.error || invRes.error) {
+      setErr(trRes.error?.message ?? invRes.error?.message ?? 'Unknown error');
+    }
+    setTrend((trRes.data as TrendData) ?? null);
+    setInvTrend((invRes.data as InvestmentTrend) ?? null);
+  }, [today, payload, span, filters]);
+  useEffect(() => { void loadSide(); }, [loadSide]);
 
   const visibleTxns = useMemo(() => {
     const getTxnAmount = (t: TxnRow) => {
@@ -137,8 +217,22 @@ export default function Reports() {
     };
 
     const filtered = txns.filter(t => {
-      if (kindFilter === 'all') return true;
-      return t.kind === kindFilter;
+      // 1. Filter by kind
+      if (kindFilter !== 'all' && t.kind !== kindFilter) return false;
+
+      // 2. Filter by search query
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const payeeMatch = (t.payee || '').toLowerCase().includes(q);
+        const catMatch = getTxnCategory(t).toLowerCase().includes(q);
+        const noteMatch = (t.notes || t.narration || '').toLowerCase().includes(q);
+        
+        const amountMatch = (getTxnAmount(t) / 100).toString().includes(q);
+
+        return payeeMatch || catMatch || noteMatch || amountMatch;
+      }
+      
+      return true;
     });
 
     const mult = sortDir === 'asc' ? 1 : -1;
@@ -152,7 +246,21 @@ export default function Reports() {
       if (sortBy === 'category') return getTxnCategory(a).localeCompare(getTxnCategory(b)) * mult;
       return 0;
     });
-  }, [txns, kindFilter, sortBy, sortDir, catNameById]);
+  }, [txns, kindFilter, sortBy, sortDir, catNameById, searchQuery]); 
+  
+
+  // Same maths as the SQL: income = -(income-account legs), expense = +(expense-account legs).
+  const listTotals = useMemo(() => {
+    let income = 0;
+    let expense = 0;
+    for (const t of visibleTxns) {
+      for (const p of t.postings) {
+        if (p.accounts?.type === 'income') income -= p.amount_minor;
+        else if (p.accounts?.type === 'expense') expense += p.amount_minor;
+      }
+    }
+    return { income, expense };
+  }, [visibleTxns]);
 
   const voidOne = async (id: number) => {
     const { error } = await supabase().rpc('void_transactions', {
@@ -160,7 +268,7 @@ export default function Reports() {
       p_reason: 'voided from reports',
     });
     if (error) { setErr(error.message); return; }
-    await load();
+    await Promise.all([load(), loadSide()]);
   };
 
   if (!today || nowYear === null || pickerYear === null) {
@@ -174,9 +282,11 @@ export default function Reports() {
   }
 
   const label = ranges.length ? ranges.map(r => r.label).join(', ') : 'All time';
+  const filterText = filterLabel(filters);
+  const isFiltered = activeFilterCount(filters) > 0;
 
   return (
-    <AppShell title="Reports" subtitle={label}>
+    <AppShell title="Reports" subtitle={filterText ? `${label} · ${filterText}` : label}>
       {err ? <div className="mb-4"><Banner kind="error">{err}</Banner></div> : null}
 
       <div className="flex flex-col gap-4 sm:gap-6">
@@ -292,6 +402,13 @@ export default function Reports() {
           ) : null}
         </Card>
 
+        <ReportFilters
+          accounts={accounts}
+          categories={categories}
+          value={filters}
+          onChange={setFilters}
+        />
+
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6">
           <Kpi label="Income" value={formatINR(summary?.income_minor ?? 0)} tone="text-emerald-400" />
           <Kpi label="Expenses" value={formatINR(summary?.expense_minor ?? 0)} tone="text-red-400" />
@@ -302,30 +419,53 @@ export default function Reports() {
           />
         </div>
 
-        <CashflowCharts summary={summary} />
+        <CashflowCharts summary={summary} filtered={isFiltered} />
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 lg:gap-6">
+          <CategoryTrend trend={trend} filtered={isFiltered} />
+          <InvestmentsPanel trend={invTrend} categoryFilterActive={filters.categoryIds.length > 0} />
+        </div>
 
         <Card className="p-0 sm:p-0">
           <div className="flex flex-col gap-3 border-b border-gray-800 p-4">
             <h2 className="text-base font-semibold text-gray-100 sm:text-lg">
-              Matching transactions ({visibleTxns.length}{txns.length === 500 ? '+' : ''})
+              Matching transactions ({visibleTxns.length}{txns.length === LIST_LIMIT ? '+' : ''})
             </h2>
+            <p className="tabular text-xs text-gray-400">
+              On this list: Income <span className="text-emerald-400">{formatINR(listTotals.income)}</span>
+              {' · '}Expenses <span className="text-red-400">{formatINR(listTotals.expense)}</span>
+              {txns.length === LIST_LIMIT ? ` · first ${LIST_LIMIT} only` : ''}
+            </p>
 
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex rounded-lg border border-gray-700 bg-gray-900 p-0.5">
-                {(['all', 'expense', 'income', 'transfer'] as KindFilter[]).map(k => (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => setKindFilter(k)}
-                    className={`min-h-8 rounded-md px-2.5 text-xs font-semibold capitalize transition-colors ${
-                      kindFilter === k ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
-                    }`}
-                  >
-                    {k}
-                  </button>
-                ))}
+              
+              {/* Group the toggle and search together */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex rounded-lg border border-gray-700 bg-gray-900 p-0.5">
+                  {(['all', 'expense', 'income', 'transfer'] as KindFilter[]).map(k => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setKindFilter(k)}
+                      className={`min-h-8 rounded-md px-2.5 text-xs font-semibold capitalize transition-colors ${
+                        kindFilter === k ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      {k}
+                    </button>
+                  ))}
+                </div>
+
+                <input
+                  type="search"
+                  placeholder="Search transactions..."
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  className="min-h-8 w-full rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs text-white placeholder-gray-500 sm:w-48"
+                />
               </div>
 
+              {/* Sort controls remain here */}
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-gray-400">Sort:</span>
                 <select
@@ -434,7 +574,7 @@ export default function Reports() {
         sysExpenseAcc={sysExpenseAcc}
         sysIncomeAcc={sysIncomeAcc}
         onClose={() => setEditingTxn(null)}
-        onSaved={load}
+        onSaved={async () => { await Promise.all([load(), loadSide()]); }}
       />
     </AppShell>
   );

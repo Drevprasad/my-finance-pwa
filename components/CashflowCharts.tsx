@@ -12,7 +12,9 @@ const COLORS = ['#3b82f6','#10b981','#8b5cf6','#f59e0b','#ef4444','#06b6d4','#f4
 
 const tooltipStyle = { backgroundColor: '#1f2937', borderColor: '#374151', color: '#fff' };
 
-export default function CashflowCharts({ summary }: { summary: DashboardSummary | null }) {
+export default function CashflowCharts({
+  summary, filtered = false,
+}: { summary: DashboardSummary | null; filtered?: boolean }) {
   const cats = summary?.by_category ?? [];
   const periods = (summary?.by_period ?? []).map(p => ({
     label: periodLabel(p.period),
@@ -20,13 +22,14 @@ export default function CashflowCharts({ summary }: { summary: DashboardSummary 
     Expense: p.expense_minor / 100,
   }));
   const totalExpense = cats.reduce((s, c) => s + c.amount_minor, 0);
+  const suffix = filtered ? 'match these filters in this period.' : 'in this period.';
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 lg:gap-6">
       <Card>
         <CardTitle>Expenses by category</CardTitle>
         {cats.length === 0 ? (
-          <Empty text="No expenses in this period." />
+          <Empty text={`No expenses ${suffix}`} />
         ) : (
           <div className="flex flex-col gap-4 sm:flex-row">
             <div className="h-52 min-w-0 flex-1">
@@ -67,7 +70,7 @@ export default function CashflowCharts({ summary }: { summary: DashboardSummary 
       <Card>
         <CardTitle>Cash flow</CardTitle>
         {periods.length === 0 ? (
-          <Empty text="No transactions in this period." />
+          <Empty text={`No transactions ${suffix}`} />
         ) : (
           <div className="h-56 min-w-0">
             <ResponsiveContainer width="100%" height="100%">
@@ -89,5 +92,5 @@ export default function CashflowCharts({ summary }: { summary: DashboardSummary 
 }
 
 function Empty({ text }: { text: string }) {
-  return <div className="flex h-40 items-center justify-center text-sm text-gray-500">{text}</div>;
+  return <div className="flex h-40 items-center justify-center px-2 text-center text-sm text-gray-500">{text}</div>;
 }

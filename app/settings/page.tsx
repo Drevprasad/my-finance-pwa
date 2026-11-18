@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AppShell from '@/components/AppShell';
+import { dueDayFromGrace, fmtDate, previewCard } from '@/lib/creditCard';
 import { Banner, Card, CardTitle, Field, btn, inputCls } from '@/components/ui';
 import { formatINR, parseMoneyToMinor } from '@/lib/money';
 import { supabase } from '@/lib/supabase';
@@ -36,9 +37,10 @@ export default function Settings() {
   const [accName, setAccName] = useState('');
   const [accKind, setAccKind] = useState('bank');
   const [initialBal, setInitialBal] = useState('');
-  const [initialDate, setInitialDate] = useState('2026-10-31');
+  const [initialDate, setInitialDate] = useState('2025-08-14');
   const [creditLimit, setCreditLimit] = useState('');
   const [statementDay, setStatementDay] = useState('');
+  const [graceDays, setGraceDays] = useState('20');
 
   // Inline Opening Balance Editor state
   const [editingAccId, setEditingAccId] = useState<number | null>(null);
@@ -93,6 +95,12 @@ export default function Settings() {
     if (!name) return;
     const kind = KINDS.find(k => k.key === accKind) ?? KINDS[0];
 
+    const sd = Number(statementDay);
+    if (kind.subtype === 'credit_card' && statementDay && (!Number.isInteger(sd) || sd < 1 || sd > 31)) {
+      setStatus({ kind: 'error', msg: 'Statement day must be between 1 and 31.' });
+      return;
+    }
+
     let openMinor = 0;
     if (initialBal.trim()) {
       try {
@@ -110,6 +118,8 @@ export default function Settings() {
       credit_limit_minor: kind.subtype === 'credit_card' && creditLimit
         ? Math.round(Number(creditLimit) * 100) : null,
       statement_day: kind.subtype === 'credit_card' && statementDay ? Number(statementDay) : null,
+      due_day: kind.subtype === 'credit_card' && statementDay
+        ? dueDayFromGrace(Number(statementDay), Number(graceDays) || 20) : null,
     }).select('id').single();
 
     if (error) { setStatus({ kind: 'error', msg: error.message }); return; }
@@ -118,7 +128,7 @@ export default function Settings() {
       const { error: openErr } = await supabase().rpc('set_account_opening_balance', {
         p_account_id: inserted.id,
         p_amount_minor: openMinor,
-        p_date: initialDate || today || '2026-10-31',
+        p_date: initialDate || today || '2025-08-14',
       });
       if (openErr) {
         setStatus({ kind: 'error', msg: `Account created, but opening balance failed: ${openErr.message}` });
@@ -128,7 +138,7 @@ export default function Settings() {
     }
 
     setStatus({ kind: 'success', msg: `Added account "${name}".` });
-    setAccName(''); setInitialBal(''); setCreditLimit(''); setStatementDay('');
+    setAccName(''); setInitialBal(''); setCreditLimit(''); setStatementDay(''); setGraceDays('20');
     await fetchData();
   };
 
@@ -144,7 +154,7 @@ export default function Settings() {
     const { error } = await supabase().rpc('set_account_opening_balance', {
       p_account_id: acc.id,
       p_amount_minor: minor,
-      p_date: editOpenDate || today || '2026-10-31',
+      p_date: editOpenDate || today || '2025-08-14',
     });
 
     if (error) {
@@ -254,15 +264,32 @@ export default function Settings() {
               </div>
 
               {accKind === 'credit_card' ? (
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Credit limit (₹)" htmlFor="acc-limit">
-                    <input id="acc-limit" inputMode="decimal" value={creditLimit}
-                           onChange={e => setCreditLimit(e.target.value)} placeholder="100000" className={inputCls} />
-                  </Field>
-                  <Field label="Statement day" htmlFor="acc-stmt">
-                    <input id="acc-stmt" inputMode="numeric" value={statementDay}
-                           onChange={e => setStatementDay(e.target.value)} placeholder="12" className={inputCls} />
-                  </Field>
+                <div className="space-y-3">
+                  <div className="grid grid-cols-3 gap-3">
+                    <Field label="Credit limit (₹)" htmlFor="acc-limit">
+                      <input id="acc-limit" inputMode="decimal" value={creditLimit}
+                             onChange={e => setCreditLimit(e.target.value)} placeholder="100000" className={inputCls} />
+                    </Field>
+                    <Field label="Statement day" htmlFor="acc-stmt">
+                      <input id="acc-stmt" inputMode="numeric" value={statementDay}
+                             onChange={e => setStatementDay(e.target.value)} placeholder="15" className={inputCls} />
+                    </Field>
+                    <Field label="Days to pay" htmlFor="acc-grace">
+                      <input id="acc-grace" inputMode="numeric" value={graceDays}
+                             onChange={e => setGraceDays(e.target.value)} placeholder="20" className={inputCls} />
+                    </Field>
+                  </div>
+                  {(() => {
+                    const sd = Number(statementDay);
+                    if (!today || !Number.isInteger(sd) || sd < 1 || sd > 31) return null;
+                    const p = previewCard(sd, Number(graceDays) || 20, today);
+                    return (
+                      <p className="text-xs text-gray-400">
+                        Next statement {fmtDate(p.nextStatement)}, payment due {fmtDate(p.nextDue)} (day {p.dueDay} of the month).
+                        Check your card app: if the bank prints a different due date, change “Days to pay”.
+                      </p>
+                    );
+                  })()}
                 </div>
               ) : null}
 
@@ -289,9 +316,14 @@ export default function Settings() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="truncate text-sm font-medium text-gray-100">{a.name}</div>
-                          <div className="text-[11px] capitalize text-gray-500">
+                          <div className="mt-0.5 text-[11px] capitalize text-gray-500">
                             {a.type} · {a.subtype.replace('_', ' ')} · Current: <span className="font-mono text-gray-300">{formatINR(displayCurr)}</span>
                           </div>
+                          {a.subtype === 'credit_card' && a.statement_day ? (
+                            <div className="mt-0.5 text-[11px] text-gray-400">
+                              Statement day {a.statement_day}{a.due_day ? `, due day ${a.due_day}` : ''}
+                            </div>
+                          ) : null}
                           <div className="mt-0.5 text-[11px] text-gray-400">
                             Opening balance: <span className="font-mono text-blue-300">{formatINR(openMinor)}</span>
                             {openInfo ? ` (as of ${openInfo.date})` : ' (not set)'}
@@ -307,7 +339,7 @@ export default function Settings() {
                               } else {
                                 setEditingAccId(a.id);
                                 setEditOpenAmt((openMinor / 100).toFixed(2));
-                                setEditOpenDate(openInfo?.date ?? '2026-10-31');
+                                setEditOpenDate(openInfo?.date ?? '2025-08-14');
                               }
                             }}
                             className="min-h-9 rounded border border-gray-700 bg-gray-800 px-2.5 text-xs font-medium text-blue-300 hover:bg-gray-700"

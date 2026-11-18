@@ -45,3 +45,15 @@ export interface CanonicalRow {
   txn_date: string; amount_minor: number; narration: string;
   payee: string | null; ref: string | null;
 }
+export interface CategoryTrendRow { category_id: number | null; name: string; by_month: number[] }
+export interface CategoryTrend { months: string[]; categories: CategoryTrendRow[] }
+
+/** Month-end cost-basis balance per investment / FD account (minor units). */
+export interface InvestmentTrendAccount {
+  account_id: number; name: string; subtype: AccountSubtype; by_month: number[];
+}
+export interface InvestmentTrend {
+  months: string[];   // 'YYYY-MM'
+  as_of: string[];    // 'YYYY-MM-DD', parallel to months (last one can be today / range end)
+  accounts: InvestmentTrendAccount[];
+}
