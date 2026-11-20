@@ -2,10 +2,10 @@
 -- PostgreSQL database dump
 --
 
-\restrict m5bjevnIAcXTtspYSrVtqXOTWXub6ICue1BvcdG40jxnYHgna9sEeNH3ePtPYaS
+\restrict csVLnE9EbyTVY7WlrwaiWNSxrLqNqmCaneG8EPZ868wNgq0lu10h8RORhHr4gw7
 
 -- Dumped from database version 17.11
--- Dumped by pg_dump version 17.12 (Ubuntu 17.12-1.pgdg24.04+1)
+-- Dumped by pg_dump version 19.0 (Ubuntu 19.0-1.pgdg24.04+1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -116,6 +116,81 @@ $$;
 
 
 --
+-- Name: category_trend(date, date, bigint[], bigint[], jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.category_trend(p_from date, p_to date, p_account_ids bigint[], p_category_ids bigint[], p_ranges jsonb) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+with today as (
+  select (now() at time zone 'Asia/Kolkata')::date as d
+),
+bounds as (
+  -- axis = months of p_from..p_to; no dates given => last 6 months; capped at 24 months
+  select
+    date_trunc('month', coalesce(p_to, d)::timestamp)::date as last_month,
+    greatest(
+      date_trunc('month', coalesce(p_from::timestamp,
+                                   coalesce(p_to, d)::timestamp - interval '5 months'))::date,
+      date_trunc('month', coalesce(p_to, d)::timestamp - interval '23 months')::date
+    ) as first_month
+  from today
+),
+months as (
+  select to_char(g, 'YYYY-MM') as period
+  from bounds b,
+       generate_series(b.first_month::timestamp, b.last_month::timestamp, interval '1 month') g
+),
+r as (
+  select (e->>'from')::date as r_from, (e->>'to')::date as r_to
+  from jsonb_array_elements(
+         case when jsonb_typeof(p_ranges) = 'array' then p_ranges else '[]'::jsonb end) e
+),
+spend as (
+  select p.category_id,
+         coalesce(c.name, 'Uncategorised') as name,
+         to_char(t.txn_date, 'YYYY-MM') as period,
+         sum(p.amount_minor) as amount_minor
+  from public.transactions t
+  join public.postings p on p.txn_id = t.id
+  join public.accounts a on a.id = p.account_id and a.type = 'expense'
+  left join public.categories c on c.id = p.category_id
+  cross join bounds b
+  where t.voided_at is null
+    and t.kind <> 'opening'
+    and t.txn_date >= b.first_month
+    and t.txn_date <  (b.last_month + interval '1 month')
+    and (p_from is null or t.txn_date >= p_from)
+    and (p_to   is null or t.txn_date <= p_to)
+    and (not exists (select 1 from r)
+         or exists (select 1 from r where t.txn_date between r.r_from and r.r_to))
+    and (coalesce(cardinality(p_account_ids), 0) = 0
+         or exists (select 1 from public.postings pa
+                    where pa.txn_id = t.id and pa.account_id = any(p_account_ids)))
+    and (coalesce(cardinality(p_category_ids), 0) = 0
+         or p.category_id = any(p_category_ids))
+  group by 1, 2, 3
+),
+cats as (select distinct category_id, name from spend)
+select jsonb_build_object(
+  'months', coalesce((select jsonb_agg(period order by period) from months), '[]'::jsonb),
+  'categories', coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'category_id', c.category_id,
+      'name', c.name,
+      'by_month', (
+        select jsonb_agg(coalesce(s.amount_minor, 0) order by m.period)
+        from months m
+        left join spend s
+          on s.period = m.period
+         and s.category_id is not distinct from c.category_id
+      )))
+    from cats c), '[]'::jsonb)
+);
+$$;
+
+
+--
 -- Name: check_transaction_balance(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -176,6 +251,99 @@ end $$;
 
 
 --
+-- Name: credit_card_summary(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.credit_card_summary() RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+with today as (
+  select (now() at time zone 'Asia/Kolkata')::date as d
+),
+cards as (
+  select a.id, a.name, a.credit_limit_minor,
+         a.statement_day::int as sd, a.due_day::int as dd
+  from public.accounts a
+  where a.type = 'liability' and a.subtype = 'credit_card'
+    and a.is_active and a.statement_day is not null
+),
+m as (
+  -- first day of previous / this / next / next-next month
+  select c.*, t.d as today,
+         date_trunc('month', t.d)::date                          as f_this,
+         (date_trunc('month', t.d) - interval '1 month')::date   as f_prev,
+         (date_trunc('month', t.d) + interval '1 month')::date   as f_next,
+         (date_trunc('month', t.d) + interval '2 month')::date   as f_next2
+  from cards c cross join today t
+),
+s as (
+  select m.*,
+         least(f_this + (sd - 1), f_next  - 1) as s_this,
+         least(f_prev + (sd - 1), f_this  - 1) as s_prev,
+         least(f_next + (sd - 1), f_next2 - 1) as s_next
+  from m
+),
+d as (
+  select s.*,
+         case when s_this <= today then s_this else s_prev end as last_stmt,
+         case when s_this >  today then s_this else s_next end as next_stmt
+  from s
+),
+due as (
+  -- due date falls in the statement month, or the month after when due_day <= statement_day
+  select d.*,
+    (date_trunc('month', last_stmt)
+       + case when dd is not null and dd <= sd then interval '1 month' else interval '0 day' end)::date as lf,
+    (date_trunc('month', next_stmt)
+       + case when dd is not null and dd <= sd then interval '1 month' else interval '0 day' end)::date as nf
+  from d
+),
+x as (
+  select due.*,
+    case when dd is null then null
+         else least(lf + (dd - 1), (lf + interval '1 month')::date - 1) end as last_due,
+    case when dd is null then null
+         else least(nf + (dd - 1), (nf + interval '1 month')::date - 1) end as next_due
+  from due
+)
+select coalesce(jsonb_agg(jsonb_build_object(
+  'account_id', x.id,
+  'name', x.name,
+  'credit_limit_minor', x.credit_limit_minor,
+  'outstanding_minor', (-amt.bal_today)::bigint,
+  'statement_balance_minor', greatest(-amt.bal_stmt, 0)::bigint,
+  'amount_due_minor', greatest(-amt.bal_stmt - amt.paid_since, 0)::bigint,
+  'last_statement', x.last_stmt,
+  'next_statement', x.next_stmt,
+  'last_due', x.last_due,
+  'next_due', x.next_due,
+  'last_payment_date', lp.txn_date,
+  'last_payment_minor', lp.amount_minor
+) order by x.name), '[]'::jsonb)
+from x
+cross join lateral (
+  select
+    coalesce(sum(p.amount_minor) filter (where t.txn_date <= x.today), 0) as bal_today,
+    coalesce(sum(p.amount_minor) filter (where t.txn_date <= x.last_stmt), 0) as bal_stmt,
+    coalesce(sum(p.amount_minor) filter (
+      where p.amount_minor > 0 and t.kind = 'transfer'
+        and t.txn_date > x.last_stmt and t.txn_date <= x.today), 0) as paid_since
+  from public.postings p
+  join public.transactions t on t.id = p.txn_id and t.voided_at is null
+  where p.account_id = x.id
+) amt
+left join lateral (
+  select t.txn_date, p.amount_minor
+  from public.postings p
+  join public.transactions t on t.id = p.txn_id and t.voided_at is null
+  where p.account_id = x.id and p.amount_minor > 0 and t.kind = 'transfer'
+  order by t.txn_date desc, p.id desc
+  limit 1
+) lp on true;
+$$;
+
+
+--
 -- Name: dashboard_summary(jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -220,6 +388,88 @@ periods as (
   select case g.g
            when 'day'   then to_char(p.txn_date, 'YYYY-MM-DD')
            else              to_char(p.txn_date, 'YYYY-MM')
+         end as period,
+         coalesce(sum(case when p.acc_type = 'income'  then -p.amount_minor end), 0) as income_minor,
+         coalesce(sum(case when p.acc_type = 'expense' then  p.amount_minor end), 0) as expense_minor
+  from post p cross join gran g
+  group by 1
+)
+select jsonb_build_object(
+  'income_minor',  (select income_minor  from tot),
+  'expense_minor', (select expense_minor from tot),
+  'by_category', coalesce((
+     select jsonb_agg(jsonb_build_object('category_id', category_id, 'name', name,
+                                         'amount_minor', amount_minor)
+                      order by amount_minor desc)
+     from cats), '[]'::jsonb),
+  'by_period', coalesce((
+     select jsonb_agg(jsonb_build_object('period', period,
+                                         'income_minor', income_minor,
+                                         'expense_minor', expense_minor)
+                      order by period)
+     from periods), '[]'::jsonb)
+);
+$$;
+
+
+--
+-- Name: dashboard_summary(jsonb, bigint[], bigint[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.dashboard_summary(p_ranges jsonb, p_account_ids bigint[], p_category_ids bigint[]) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+with r as (
+  select (e->>'from')::date as f, (e->>'to')::date as t
+  from jsonb_array_elements(
+         case when jsonb_typeof(p_ranges) = 'array' then p_ranges else '[]'::jsonb end) e
+),
+matched as (
+  select t.id, t.txn_date
+  from public.transactions t
+  where t.voided_at is null
+    and t.kind <> 'opening'
+    and (not exists (select 1 from r)
+         or exists (select 1 from r where t.txn_date between r.f and r.t))
+    and (coalesce(cardinality(p_account_ids), 0) = 0
+         or exists (select 1 from public.postings pa
+                    where pa.txn_id = t.id and pa.account_id = any(p_account_ids)))
+    and (coalesce(cardinality(p_category_ids), 0) = 0
+         or exists (select 1 from public.postings pc
+                    where pc.txn_id = t.id and pc.category_id = any(p_category_ids)))
+),
+post as (
+  select p.amount_minor, p.category_id, a.type as acc_type, m.txn_date
+  from public.postings p
+  join matched m on m.id = p.txn_id
+  join public.accounts a on a.id = p.account_id
+  -- with a category filter, count only the selected category's income/expense legs
+  -- (so split bills don't pull in their other categories)
+  where coalesce(cardinality(p_category_ids), 0) = 0
+     or a.type not in ('income', 'expense')
+     or p.category_id = any(p_category_ids)
+),
+span as (select coalesce(max(txn_date) - min(txn_date), 0) as days from post),
+gran as (select case when (select days from span) <= 62 then 'day' else 'month' end as g),
+tot as (
+  select coalesce(sum(case when acc_type = 'income'  then -amount_minor end), 0) as income_minor,
+         coalesce(sum(case when acc_type = 'expense' then  amount_minor end), 0) as expense_minor
+  from post
+),
+cats as (
+  select p.category_id,
+         coalesce(c.name, 'Uncategorised') as name,
+         sum(p.amount_minor) as amount_minor
+  from post p
+  left join public.categories c on c.id = p.category_id
+  where p.acc_type = 'expense'
+  group by 1, 2
+  having sum(p.amount_minor) <> 0
+),
+periods as (
+  select case g.g
+           when 'day' then to_char(p.txn_date, 'YYYY-MM-DD')
+           else            to_char(p.txn_date, 'YYYY-MM')
          end as period,
          coalesce(sum(case when p.acc_type = 'income'  then -p.amount_minor end), 0) as income_minor,
          coalesce(sum(case when p.acc_type = 'expense' then  p.amount_minor end), 0) as expense_minor
@@ -322,6 +572,7 @@ DECLARE
   v_failed jsonb := '[]'::jsonb;
   v_date date;
   v_minor bigint;
+  v_bal_minor bigint;
   v_narr text;
   v_payee text;
   v_ref text;
@@ -350,8 +601,10 @@ BEGIN
 
   SELECT id INTO v_exp_acc FROM public.accounts WHERE user_id = v_uid AND type = 'expense' LIMIT 1;
   SELECT id INTO v_inc_acc FROM public.accounts WHERE user_id = v_uid AND type = 'income' LIMIT 1;
-  SELECT id INTO v_default_exp_cat FROM public.categories WHERE user_id = v_uid AND kind = 'expense' AND is_active = true ORDER BY id LIMIT 1;
-  SELECT id INTO v_default_inc_cat FROM public.categories WHERE user_id = v_uid AND kind = 'income' AND is_active = true ORDER BY id LIMIT 1;
+
+  -- Direct scalar assignment (fixes 'column "id" does not exist')
+  v_default_exp_cat := public.get_default_category(v_uid, 'expense');
+  v_default_inc_cat := public.get_default_category(v_uid, 'income');
 
   FOR v_row IN SELECT * FROM jsonb_array_elements(p_rows)
   LOOP
@@ -359,6 +612,7 @@ BEGIN
     BEGIN
       v_date := (v_row->>'txn_date')::date;
       v_minor := (v_row->>'amount_minor')::bigint;
+      v_bal_minor := NULLIF(v_row->>'balance_minor', '')::bigint;
       v_narr := COALESCE(NULLIF(btrim(v_row->>'narration'), ''), 'Imported');
       v_payee := NULLIF(btrim(v_row->>'payee'), '');
       v_ref := NULLIF(btrim(v_row->>'ref'), '');
@@ -371,7 +625,6 @@ BEGIN
         RAISE EXCEPTION 'Invalid date or zero amount';
       END IF;
 
-      -- Auto-match from rules if payee or category wasn't explicitly set
       IF v_payee IS NULL OR (v_cat_id IS NULL AND v_kind <> 'transfer') THEN
         SELECT
           COALESCE(v_payee, r.payee_name),
@@ -385,7 +638,6 @@ BEGIN
         LIMIT 1;
       END IF;
 
-      -- Save / update rule in memory if user provided a clean payee and rule_key
       IF v_rule_key IS NOT NULL AND length(v_rule_key) >= 3 AND v_payee IS NOT NULL THEN
         IF EXISTS (
           SELECT 1 FROM public.rules
@@ -439,9 +691,9 @@ BEGIN
       END IF;
 
       INSERT INTO public.transactions (
-        user_id, txn_date, payee, narration, kind, dedupe_hash
+        user_id, txn_date, payee, narration, kind, dedupe_hash, external_ref, statement_balance_minor
       ) VALUES (
-        v_uid, v_date, COALESCE(v_payee, 'Bank Import'), v_narr, v_kind, v_hash
+        v_uid, v_date, COALESCE(v_payee, 'Bank Import'), v_narr, v_kind, v_hash, v_ref, v_bal_minor
       ) RETURNING id INTO v_txn_id;
 
       INSERT INTO public.postings (user_id, txn_id, account_id, amount_minor, category_id)
@@ -464,6 +716,70 @@ BEGIN
     'failed', v_failed
   );
 END;
+$$;
+
+
+--
+-- Name: investment_trend(date, date, bigint[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.investment_trend(p_from date DEFAULT NULL::date, p_to date DEFAULT NULL::date, p_account_ids bigint[] DEFAULT NULL::bigint[]) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+with today as (
+  select (now() at time zone 'Asia/Kolkata')::date as d
+),
+bounds as (
+  select
+    date_trunc('month', coalesce(p_to, d)::timestamp)::date as last_month,
+    greatest(
+      date_trunc('month', coalesce(p_from::timestamp,
+                                   coalesce(p_to, d)::timestamp - interval '5 months'))::date,
+      date_trunc('month', coalesce(p_to, d)::timestamp - interval '23 months')::date
+    ) as first_month
+  from today
+),
+months as (
+  -- point date = month end, but never later than p_to or today (least() ignores NULLs)
+  select to_char(g, 'YYYY-MM') as period,
+         least((g + interval '1 month' - interval '1 day')::date,
+               p_to,
+               (select d from today)) as as_of
+  from bounds b,
+       generate_series(b.first_month::timestamp, b.last_month::timestamp, interval '1 month') g
+),
+accts as (
+  select a.id, a.name, a.subtype
+  from public.accounts a
+  where a.type = 'asset'
+    and a.subtype in ('investment', 'fd')
+    and a.is_active
+    and (coalesce(cardinality(p_account_ids), 0) = 0 or a.id = any(p_account_ids))
+),
+bal as (
+  select a.id, m.period,
+         coalesce((
+           select sum(p.amount_minor)
+           from public.postings p
+           join public.transactions t on t.id = p.txn_id and t.voided_at is null
+           where p.account_id = a.id
+             and t.txn_date <= m.as_of
+         ), 0) as balance_minor
+  from accts a cross join months m
+)
+select jsonb_build_object(
+  'months', coalesce((select jsonb_agg(period order by period) from months), '[]'::jsonb),
+  'as_of',  coalesce((select jsonb_agg(as_of order by period) from months), '[]'::jsonb),
+  'accounts', coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'account_id', a.id,
+      'name', a.name,
+      'subtype', a.subtype,
+      'by_month', coalesce((select jsonb_agg(b.balance_minor order by b.period)
+                            from bal b where b.id = a.id), '[]'::jsonb)
+    ) order by a.name)
+    from accts a), '[]'::jsonb)
+);
 $$;
 
 
@@ -713,6 +1029,7 @@ CREATE TABLE public.transactions (
     import_batch_id bigint,
     external_ref text,
     dedupe_base text,
+    statement_balance_minor bigint,
     CONSTRAINT transactions_status_check CHECK ((status = ANY (ARRAY['posted'::text, 'pending'::text, 'voided'::text])))
 );
 
@@ -1298,5 +1615,5 @@ CREATE POLICY transactions_owner_all ON public.transactions TO authenticated USI
 -- PostgreSQL database dump complete
 --
 
-\unrestrict m5bjevnIAcXTtspYSrVtqXOTWXub6ICue1BvcdG40jxnYHgna9sEeNH3ePtPYaS
+\unrestrict csVLnE9EbyTVY7WlrwaiWNSxrLqNqmCaneG8EPZ868wNgq0lu10h8RORhHr4gw7
 

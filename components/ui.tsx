@@ -1,8 +1,17 @@
 import type { ReactNode } from 'react';
 
-export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
+export function Card({
+  children,
+  className = '',
+  padded = true,
+}: {
+  children: ReactNode;
+  className?: string;
+  padded?: boolean;
+}) {
+  const padding = padded ? 'p-4 shadow-sm sm:p-6' : 'shadow-sm';
   return (
-    <section className={`min-w-0 rounded-xl border border-gray-800 bg-gray-800/60 p-4 shadow-sm sm:p-6 ${className}`}>
+    <section className={`min-w-0 rounded-xl border border-gray-800 bg-gray-800/60 ${padding} ${className}`}>
       {children}
     </section>
   );
