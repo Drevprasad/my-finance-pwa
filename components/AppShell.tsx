@@ -2,18 +2,43 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { getSupabase } from '@/lib/supabase';
 
-const TABS = [
+const BASE_TABS = [
   { href: '/', label: 'Home', icon: '🏠' },
   { href: '/reports', label: 'Reports', icon: '📊' },
   { href: '/settings', label: 'Settings', icon: '⚙️' },
 ];
 
+const DAD_TAB = { href: '/dad', label: 'Dad', icon: '👨' };
+
 export default function AppShell({
   title, subtitle, actions, children,
 }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
   const pathname = usePathname();
+  const [showDad, setShowDad] = useState(false);
+
+  // Show the Dad tab only when the current user is a lite viewer.
+  useEffect(() => {
+    let alive = true;
+    const db = getSupabase();
+    db.auth.getSession().then(async ({ data }) => {
+      if (!alive || !data.session) return;
+      const { data: rows, error } = await db
+        .from('lite_shares')
+        .select('id')
+        .eq('viewer_id', data.session.user.id)
+        .limit(1);
+      if (!alive || error) return;
+      if (rows && rows.length > 0) setShowDad(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const TABS = showDad ? [...BASE_TABS, DAD_TAB] : BASE_TABS;
 
   useEffect(() => {
     if (process.env.NODE_ENV !== 'production') return;
