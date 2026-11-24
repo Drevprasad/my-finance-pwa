@@ -6,7 +6,7 @@ import { Card, CardTitle, Banner, Field, btn, inputCls } from '@/components/ui';
 import type { LiteCategoryRow, LitePayeeRow, LiteEntryRow, LiteKind } from '@/lib/lite/types';
 
 export function LiteEntryForm({
-  ownerId, categories, payees, editing, onSaved, onCancel,
+  ownerId, categories, payees, editing, onSaved, onCancel, defaultKind,
 }: {
   ownerId: string;
   categories: LiteCategoryRow[];
@@ -14,9 +14,10 @@ export function LiteEntryForm({
   editing: LiteEntryRow | null;
   onSaved: () => void;
   onCancel: () => void;
+  defaultKind?: LiteKind;
 }) {
   const [entryDate, setEntryDate] = useState(editing?.entry_date ?? new Date().toISOString().slice(0, 10));
-  const [kind, setKind] = useState<LiteKind>(editing?.kind ?? 'expense');
+  const [kind, setKind] = useState<LiteKind>(editing?.kind ?? defaultKind ?? 'expense');
   const [amount, setAmount] = useState(editing ? String(editing.amount_minor / 100) : '');
   const [categoryId, setCategoryId] = useState(editing?.category_id != null ? String(editing.category_id) : '');
   const [payeeId, setPayeeId] = useState(editing?.payee_id != null ? String(editing.payee_id) : '');
@@ -100,12 +101,13 @@ export function LiteEntryForm({
 }
 
 function NameList({
-  title, rows, onAdd, onRename,
+  title, rows, onAdd, onRename, onDelete,
 }: {
   title: string;
   rows: { id: number; name: string }[];
   onAdd: (name: string) => Promise<void>;
   onRename: (id: number, name: string) => Promise<void>;
+  onDelete: (id: number, name: string) => Promise<void>;
 }) {
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -128,6 +130,13 @@ function NameList({
     setBusy(false);
   }
 
+  async function del(id: number, name: string) {
+    if (!window.confirm(`Delete "${name}"?`)) return;
+    setBusy(true); setError(null);
+    await onDelete(id, name);
+    setBusy(false);
+  }
+
   return (
     <div className="min-w-0">
       <h3 className="mb-2 text-sm font-semibold text-gray-200">{title}</h3>
@@ -142,6 +151,7 @@ function NameList({
           <li key={r.id} className="flex items-center justify-between gap-2">
             <span className="min-w-0 truncate text-sm text-gray-300">{r.name}</span>
             <button className={btn('ghost', 'shrink-0')} onClick={() => rename(r.id)} disabled={busy}>Rename</button>
+            <button className={`${btn('ghost', 'shrink-0')} min-h-[44px] text-rose-400`} onClick={() => del(r.id, r.name)} disabled={busy}>Delete</button>
           </li>
         ))}
       </ul>
@@ -183,6 +193,21 @@ export function LiteManagePanel({
     if (err) setError(err.message); else onChanged();
   }
 
+  async function deleteItem(table: 'lite_categories' | 'lite_payees', id: number, name: string) {
+    const { count, error: usageErr } = await supabase
+      .from('lite_entries')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', ownerId)
+      .eq(table === 'lite_categories' ? 'category_id' : 'payee_id', id);
+    if (usageErr) { setError(usageErr.message); return; }
+    if (count && count > 0) {
+      setError(`"${name}" is used by ${count} entries. Edit or delete those entries first.`);
+      return;
+    }
+    const { error: err } = await supabase.from(table).delete().eq('id', id).eq('user_id', ownerId);
+    if (err) setError(err.message); else onChanged();
+  }
+
   return (
     <Card>
       <CardTitle>Manage</CardTitle>
@@ -193,18 +218,21 @@ export function LiteManagePanel({
           rows={categories.filter((c) => c.kind === 'expense' && c.is_active)}
           onAdd={(n) => addCategory(n, 'expense')}
           onRename={renameCategory}
+          onDelete={(id, n) => deleteItem('lite_categories', id, n)}
         />
         <NameList
           title="Received categories"
           rows={categories.filter((c) => c.kind === 'received' && c.is_active)}
           onAdd={(n) => addCategory(n, 'received')}
           onRename={renameCategory}
+          onDelete={(id, n) => deleteItem('lite_categories', id, n)}
         />
         <NameList
           title="Payees"
           rows={payees.filter((p) => p.is_active)}
           onAdd={addPayee}
           onRename={renamePayee}
+          onDelete={(id, n) => deleteItem('lite_payees', id, n)}
         />
       </div>
     </Card>

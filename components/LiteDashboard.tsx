@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { Card, CardTitle, Banner, btn } from '@/components/ui';
+import { Banner } from '@/components/ui';
 import { LiteCharts } from '@/components/lite/LiteCharts';
 import { LiteEntryForm, LiteManagePanel } from '@/components/lite/LiteControls';
-import type { LiteCategoryRow, LiteEntryRow, LitePayeeRow } from '@/lib/lite/types';
+import type { LiteCategoryRow, LiteEntryRow, LitePayeeRow, LiteKind } from '@/lib/lite/types';
 
 const inr = new Intl.NumberFormat('en-IN', {
   minimumFractionDigits: 2,
@@ -20,6 +20,20 @@ function currentMonth(): string {
   return new Date().toISOString().slice(0, 7);
 }
 
+function fmtDay(date: string): string {
+  return new Date(date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+}
+
+function mapName(map: Map<number, string>, id: number | null): string | undefined {
+  return id == null ? undefined : map.get(id);
+}
+
+type Tab = 'entries' | 'charts' | 'manage';
+type ModalState = { editing: LiteEntryRow | null; defaultKind?: LiteKind } | null;
+
+const CARD = 'rounded-2xl border border-white/10 bg-slate-900/60 p-4';
+const TEXT_BTN = 'min-h-[44px] inline-flex items-center text-sm text-slate-400';
+
 export function LiteDashboard({
   ownerId,
   readOnly,
@@ -33,7 +47,8 @@ export function LiteDashboard({
   const [entries, setEntries] = useState<LiteEntryRow[]>([]);
   const [categories, setCategories] = useState<LiteCategoryRow[]>([]);
   const [payees, setPayees] = useState<LitePayeeRow[]>([]);
-  const [editing, setEditing] = useState<LiteEntryRow | null>(null);
+  const [tab, setTab] = useState<Tab>('entries');
+  const [modal, setModal] = useState<ModalState>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -60,6 +75,14 @@ export function LiteDashboard({
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!modal) return;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [modal]);
+
   const monthEntries = useMemo(
     () => entries.filter((e) => e.entry_date.slice(0, 7) === month),
     [entries, month],
@@ -71,6 +94,9 @@ export function LiteDashboard({
 
   const catName = new Map(categories.map((c) => [c.id, c.name]));
   const payeeName = new Map(payees.map((p) => [p.id, p.name]));
+
+  const tabs: Tab[] = readOnly ? ['entries', 'charts'] : ['entries', 'charts', 'manage'];
+  const activeTab = tabs.includes(tab) ? tab : 'entries';
 
   async function signOut() {
     setBusy(true);
@@ -93,104 +119,153 @@ export function LiteDashboard({
       setError(err.message);
       return;
     }
-    if (editing?.id === entry.id) setEditing(null);
+    if (modal?.editing?.id === entry.id) setModal(null);
     await refresh();
   }
 
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold text-gray-100">{title ?? 'Lite Dashboard'}</h1>
-        <div className="flex items-center gap-2">
-          <input
-            type="month"
-            className="rounded border border-gray-600 bg-gray-800 px-2 py-1 text-sm text-gray-100"
-            value={month}
-            max={currentMonth()}
-            onChange={(e) => setMonth(e.target.value)}
-          />
-          {!readOnly && (
-            <button className={btn('ghost')} onClick={signOut} disabled={busy}>
-              Sign Out
-            </button>
-          )}
-        </div>
+    <div className="mx-auto max-w-xl space-y-4 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-lg font-semibold text-slate-100">{title ?? 'Lite Finance'}</h1>
+        {!readOnly && (
+          <button className={TEXT_BTN} onClick={signOut} disabled={busy}>Sign Out</button>
+        )}
       </div>
+
+      <input
+        type="month"
+        aria-label="Month"
+        className="h-11 w-full rounded-xl border border-white/10 bg-slate-900/60 px-3 text-sm text-slate-200"
+        value={month}
+        onChange={(e) => setMonth(e.target.value || currentMonth())}
+      />
 
       {error && <Banner kind="error">{error}</Banner>}
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Card>
-          <CardTitle>Total Received</CardTitle>
-          <p className="text-2xl font-semibold text-green-500">{fmtMinor(received)}</p>
-        </Card>
-        <Card>
-          <CardTitle>Total Spent</CardTitle>
-          <p className="text-2xl font-semibold text-red-500">{fmtMinor(spent)}</p>
-        </Card>
-        <Card>
-          <CardTitle>Remaining Balance</CardTitle>
-          <p className={`text-2xl font-semibold ${remaining >= 0 ? 'text-gray-100' : 'text-red-500'}`}>{fmtMinor(remaining)}</p>
-        </Card>
+      <div className={CARD}>
+        <div className="text-xs uppercase tracking-wide text-slate-400">Remaining</div>
+        <div className="mt-1 text-3xl font-semibold text-slate-100">{fmtMinor(remaining)}</div>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-xs text-slate-400">Received</div>
+            <div className="text-lg font-semibold text-emerald-400">{fmtMinor(received)}</div>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400">Spent</div>
+            <div className="text-lg font-semibold text-rose-400">{fmtMinor(spent)}</div>
+          </div>
+        </div>
       </div>
 
-      <LiteCharts entries={monthEntries} allEntries={entries} categories={categories} payees={payees} />
-
-      <Card>
-        <CardTitle>Entries — {month}</CardTitle>
-        {busy ? (
-          <p className="text-sm text-gray-400">Loading…</p>
-        ) : monthEntries.length === 0 ? (
-          <p className="text-sm text-gray-400">No entries for this month.</p>
-        ) : (
-          <ul className="space-y-2">
-            {monthEntries.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 text-sm text-gray-300">
-                <span className="min-w-0 flex-1 truncate">
-                  <span className="font-mono text-xs text-gray-500">{e.entry_date}</span>
-                  {' · '}
-                  {e.kind === 'received' ? 'Received' : 'Expense'}
-                  {' · '}
-                  {catName.get(e.category_id ?? 0) ?? 'Uncategorized'}
-                  {e.payee_id != null ? ` · ${payeeName.get(e.payee_id) ?? 'Unknown'}` : ''}
-                  {e.notes ? ` · ${e.notes}` : ''}
-                </span>
-                <span className={`shrink-0 font-semibold ${e.kind === 'received' ? 'text-green-500' : 'text-red-500'}`}>
-                  {fmtMinor(e.amount_minor)}
-                </span>
-                {!readOnly && (
-                  <span className="flex shrink-0 gap-2">
-                    <button className={btn('ghost')} onClick={() => setEditing(e)} disabled={busy}>Edit</button>
-                    <button className={btn('ghost')} onClick={() => removeEntry(e)} disabled={busy}>Delete</button>
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
-
       {!readOnly && (
-        <LiteEntryForm
-          ownerId={ownerId}
+        <div className="flex gap-2">
+          <button
+            className="min-h-[44px] flex-1 rounded-xl border border-rose-500/30 bg-rose-500/10 text-sm font-medium text-rose-300"
+            onClick={() => setModal({ editing: null, defaultKind: 'expense' })}
+          >
+            + Expense
+          </button>
+          <button
+            className="min-h-[44px] flex-1 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-sm font-medium text-emerald-300"
+            onClick={() => setModal({ editing: null, defaultKind: 'received' })}
+          >
+            + Received
+          </button>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        {tabs.map((t) => (
+          <button
+            key={t}
+            className={`min-h-[44px] flex-1 rounded-xl px-3 text-sm font-medium ${
+              activeTab === t ? 'bg-slate-800 text-slate-100' : 'text-slate-400'
+            }`}
+            onClick={() => setTab(t)}
+          >
+            {t === 'entries' ? 'Entries' : t === 'charts' ? 'Charts' : 'Manage'}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'entries' && (
+        <div className="space-y-2">
+          {monthEntries.length === 0 && (
+            <div className={`${CARD} text-sm text-slate-400`}>No entries this month.</div>
+          )}
+          {monthEntries.map((e) => (
+            <div key={e.id} className={CARD}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-slate-200">
+                    {mapName(catName, e.category_id) ?? (e.kind === 'expense' ? 'Expense' : 'Received')}
+                    {mapName(payeeName, e.payee_id) ? ` · ${mapName(payeeName, e.payee_id)}` : ''}
+                  </div>
+                </div>
+                <div className={`shrink-0 text-sm font-semibold ${e.kind === 'expense' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                  {e.kind === 'expense' ? '−' : '+'}{fmtMinor(e.amount_minor)}
+                </div>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0 text-xs text-slate-400">
+                  {fmtDay(e.entry_date)}
+                  {e.notes ? <span className="ml-2 break-words">{e.notes}</span> : null}
+                </div>
+                {!readOnly && (
+                  <div className="flex shrink-0 gap-2">
+                    <button className={TEXT_BTN} onClick={() => setModal({ editing: e })}>Edit</button>
+                    <button className={TEXT_BTN} onClick={() => removeEntry(e)} disabled={busy}>Delete</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {activeTab === 'charts' && (
+        <LiteCharts
+          entries={monthEntries}
+          allEntries={entries}
           categories={categories}
           payees={payees}
-          editing={editing}
-          onSaved={() => {
-            setEditing(null);
-            void refresh();
-          }}
-          onCancel={() => setEditing(null)}
         />
       )}
 
-      {!readOnly && (
+      {activeTab === 'manage' && !readOnly && (
         <LiteManagePanel
           ownerId={ownerId}
           categories={categories}
           payees={payees}
-          onChanged={() => void refresh()}
+          onChanged={refresh}
         />
+      )}
+
+      {modal && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          onClick={() => setModal(null)}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-t-2xl bg-slate-950 p-4"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <LiteEntryForm
+              key={`${modal.editing?.id ?? 'new'}-${modal.defaultKind ?? 'default'}`}
+              ownerId={ownerId}
+              categories={categories}
+              payees={payees}
+              editing={modal.editing}
+              defaultKind={modal.defaultKind}
+              onSaved={() => {
+                setModal(null);
+                void refresh();
+              }}
+              onCancel={() => setModal(null)}
+            />
+          </div>
+        </div>
       )}
     </div>
   );
