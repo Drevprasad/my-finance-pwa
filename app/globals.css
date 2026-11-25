@@ -53,3 +53,27 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+/* Light theme for the lite dashboard only */
+body:has(.lite-light) { background: #f8fafc; }
+.lite-light {
+  color-scheme: light;
+  min-height: 100vh;
+  background: #f8fafc;
+  color: #0f172a;
+  --color-white: #0f172a;
+  --color-slate-50: #020617;  --color-slate-100: #0f172a; --color-slate-200: #1e293b;
+  --color-slate-300: #334155; --color-slate-400: #475569; --color-slate-500: #475569;
+  --color-slate-600: #94a3b8; --color-slate-700: #cbd5e1; --color-slate-800: #e2e8f0;
+  --color-slate-900: #f1f5f9; --color-slate-950: #f8fafc;
+  --color-gray-50: #030712;  --color-gray-100: #111827; --color-gray-200: #1f2937;
+  --color-gray-300: #374151; --color-gray-400: #4b5563; --color-gray-500: #4b5563;
+  --color-gray-600: #9ca3af; --color-gray-700: #d1d5db; --color-gray-800: #e5e7eb;
+  --color-gray-900: #f3f4f6; --color-gray-950: #f9fafb;
+  --color-emerald-300: #047857; --color-emerald-400: #047857;
+  --color-green-300: #15803d;   --color-green-400: #15803d; --color-green-500: #15803d;
+  --color-rose-300: #be123c;    --color-rose-400: #be123c;
+  --color-red-300: #b91c1c;     --color-red-400: #b91c1c;   --color-red-500: #b91c1c;
+}
+.lite-light [class*="bg-blue-6"], .lite-light [class*="bg-blue-7"],
+.lite-light [class*="bg-rose-6"], .lite-light [class*="bg-rose-7"],
+.lite-light [class*="bg-emerald-6"], .lite-light [class*="bg-emerald-7"] { color: #fff; }

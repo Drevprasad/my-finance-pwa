@@ -125,7 +125,7 @@ export function LiteDashboard({
 
 
   return (
-    <div className="mx-auto max-w-xl space-y-4 p-4">
+    <div className="lite-light mx-auto max-w-xl space-y-4 p-4">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-lg font-semibold text-slate-100">{title ?? 'Lite Finance'}</h1>
         {!readOnly && (
